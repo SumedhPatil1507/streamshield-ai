@@ -207,11 +207,22 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Singleton Engine Cache
+# Singleton Engine Cache & Auto-Bootstrap
 # ---------------------------------------------------------------------------
+def _ensure_models_exist() -> None:
+    """Ensure ONNX stub models exist, generating them on-the-fly if needed."""
+    from pathlib import Path
+    text_path = Path(settings.TEXT_ONNX_PATH)
+    image_path = Path(settings.IMAGE_MODEL_PATH)
+    if not text_path.exists() or not image_path.exists():
+        from scripts.export_onnx_stubs import main as export_stubs_main
+        export_stubs_main()
+
+
 @st.cache_resource(show_spinner="⚡ Initialising ONNX Multimodal Inference Engine...")
 def load_inference_engine() -> InferenceEngine:
     """Load ONNX runtime sessions for Text & Image inference once."""
+    _ensure_models_exist()
     return InferenceEngine(
         text_model_path=settings.TEXT_ONNX_PATH,
         image_model_path=settings.IMAGE_MODEL_PATH,
@@ -222,6 +233,7 @@ try:
 except Exception as e:
     st.error(f"Failed to load ONNX inference engine: {e}")
     st.stop()
+
 
 
 # ---------------------------------------------------------------------------
