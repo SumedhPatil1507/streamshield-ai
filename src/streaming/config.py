@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     PRODUCER_RATE_HZ: float = 10.0
     PRODUCER_NUM_MESSAGES: int = 1000
 
+    # ── Inference models ──────────────────────────────────────────────────────
+    TEXT_MODEL_PATH: str = "distilbert-base-uncased"
+    IMAGE_MODEL_PATH: str = "models/image_classifier.onnx"
+    TEXT_ONNX_PATH: str = "models/text_toxicity.onnx"
+    MAX_IMAGE_FETCH_TIMEOUT_S: float = 5.0
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
