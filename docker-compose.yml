@@ -1,0 +1,87 @@
+# ──────────────────────────────────────────────
+# StreamShield AI — local dev infrastructure
+# Kafka (KRaft, no ZooKeeper) + PostgreSQL
+# ──────────────────────────────────────────────
+
+services:
+
+  # ── Kafka (Bitnami KRaft mode — no ZooKeeper required) ──────────────────────
+  kafka:
+    image: bitnami/kafka:3.7.0
+    container_name: streamshield-kafka
+    ports:
+      - "9092:9092"       # external (host → container)
+      - "9093:9093"       # KRaft controller
+    environment:
+      # KRaft settings
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      # Listeners — PLAINTEXT for internal, EXTERNAL for host access
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9091,CONTROLLER://:9093,EXTERNAL://:9092"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9091,EXTERNAL://localhost:9092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      # Topic defaults
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_NUM_PARTITIONS: "4"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_LOG_RETENTION_HOURS: "24"
+
+      # Cluster ID (must be a valid base64-encoded 16-byte UUID)
+      KAFKA_KRAFT_CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9091 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka topic bootstrap (runs once, then exits) ───────────────────────────
+  kafka-init:
+    image: bitnami/kafka:3.7.0
+    container_name: streamshield-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "kafka-topics.sh
+        --bootstrap-server kafka:9091
+        --create
+        --if-not-exists
+        --topic multimodal-stream
+        --partitions 4
+        --replication-factor 1 &&
+      echo 'Topic multimodal-stream ready.'"
+    restart: "no"
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16.3-alpine
+    container_name: streamshield-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: "user"
+      POSTGRES_PASSWORD: "password"
+      POSTGRES_DB: "streamshield"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d streamshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  kafka_data:
+  postgres_data:

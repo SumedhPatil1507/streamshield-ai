@@ -17,3 +17,9 @@ onnx>=1.16.0
 transformers>=4.41.0
 Pillow>=10.3.0
 numpy>=1.26.0
+
+# Interactive Dashboard & Visualisations
+streamlit>=1.35.0
+plotly>=5.22.0
+pandas>=2.2.0
+

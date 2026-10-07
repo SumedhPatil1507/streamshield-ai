@@ -118,8 +118,21 @@ def normalize_l2(x: np.ndarray) -> np.ndarray:
 # Async image fetching
 # ---------------------------------------------------------------------------
 
+def _make_synthetic_jpeg_bytes() -> bytes:
+    """Generate minimal 224x224 RGB JPEG bytes for offline/fallback use."""
+    from PIL import Image
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", (224, 224), color=(32, 32, 32)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 async def load_image_bytes_async(url: str) -> bytes:
     """Fetch raw image bytes from *url* asynchronously.
+
+    If ``STREAMSHIELD_OFFLINE`` is set, returns synthetic image bytes immediately
+    to avoid external network roundtrips in air-gapped CI or local testing.
 
     Uses ``httpx.AsyncClient`` with a 5-second timeout. Raises
     ``httpx.HTTPStatusError`` for non-2xx responses.
@@ -141,8 +154,12 @@ async def load_image_bytes_async(url: str) -> bytes:
     httpx.TimeoutException
         When the request times out.
     """
+    if os.environ.get("STREAMSHIELD_OFFLINE", "").strip() not in ("", "0", "false", "False"):
+        return _make_synthetic_jpeg_bytes()
+
     timeout = httpx.Timeout(5.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         response = await client.get(url)
         response.raise_for_status()
         return response.content
+

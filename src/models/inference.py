@@ -66,6 +66,10 @@ class ModerationResult:
         128-dimensional L2-normalised image feature vector.
     latency_ms:
         Wall-clock time for the entire batch that contained this item.
+    image_fetch_failed:
+        ``True`` when the image could not be fetched and a zero-vector
+        placeholder was used instead.  Downstream consumers can use this
+        flag to down-weight image confidence or trigger a retry.
     """
 
     payload_id: str
@@ -76,6 +80,7 @@ class ModerationResult:
     text_embedding: List[float]
     image_embedding: List[float]
     latency_ms: float
+    image_fetch_failed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -221,12 +226,18 @@ class InferenceEngine:
         image_urls = [item.image_url for item in batch]
 
         # Run text and image inference concurrently.
-        (text_logits, text_embeddings), (image_logits, image_embeddings) = (
-            await asyncio.gather(
-                self._run_text_inference(texts),
-                self._run_image_inference(image_urls),
-            )
+        (text_logits, text_embeddings, _), (
+            image_logits,
+            image_embeddings,
+            fetch_failures,
+        ) = await asyncio.gather(
+            self._run_text_inference(texts),
+            self._run_image_inference(image_urls),
         )
+
+        # Compute total latency ONCE after both pipelines complete so every
+        # ModerationResult in the batch carries the same correct value.
+        total_latency_ms = (time.perf_counter() - start) * 1000.0
 
         results: List[ModerationResult] = []
         for i, item in enumerate(batch):
@@ -234,8 +245,6 @@ class InferenceEngine:
             image_prob: float = float(sigmoid(image_logits[i : i + 1])[0, 1])
             confidence: float = max(text_prob, image_prob)
             label: str = "Toxic" if confidence >= 0.5 else "Non-Toxic"
-
-            latency_ms = (time.perf_counter() - start) * 1000.0
 
             results.append(
                 ModerationResult(
@@ -246,11 +255,11 @@ class InferenceEngine:
                     image_confidence=image_prob,
                     text_embedding=normalize_l2(text_embeddings[i]).tolist(),
                     image_embedding=normalize_l2(image_embeddings[i]).tolist(),
-                    latency_ms=latency_ms,
+                    latency_ms=total_latency_ms,
+                    image_fetch_failed=fetch_failures[i],
                 )
             )
 
-        total_latency_ms = (time.perf_counter() - start) * 1000.0
         log = logger.bind(batch_size=len(batch), latency_ms=round(total_latency_ms, 2))
         if total_latency_ms > 50.0:
             log.warning("batch_latency_exceeded_50ms")
@@ -265,7 +274,7 @@ class InferenceEngine:
 
     async def _run_text_inference(
         self, texts: List[str]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, List[bool]]:
         """Tokenise *texts* and run the text ONNX session in an executor.
 
         Parameters
@@ -291,13 +300,14 @@ class InferenceEngine:
             )
             return outputs[0], outputs[1]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         logits, embeddings = await loop.run_in_executor(None, _run)
-        return logits, embeddings
+        # Return a dummy third element so both gather arms unpack uniformly.
+        return logits, embeddings, [False] * len(texts)
 
     async def _run_image_inference(
         self, image_urls: List[str]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, List[bool]]:
         """Fetch images concurrently, preprocess, and run the image ONNX session.
 
         Per-item HTTP errors are handled gracefully: failed images are replaced
@@ -317,17 +327,17 @@ class InferenceEngine:
         fetch_tasks = [_safe_fetch(url) for url in image_urls]
         image_bytes_list: List[Optional[bytes]] = await asyncio.gather(*fetch_tasks)
 
-        # Build pixel tensor, using a black image for any failed fetch.
+        # Build pixel tensor, tracking which items failed.
         processed: List[np.ndarray] = []
-        for i, raw in enumerate(image_bytes_list):
+        fetch_failures: List[bool] = []
+        for raw in image_bytes_list:
             if raw is None:
-                # Zero-filled placeholder: (3, 224, 224)
                 processed.append(np.zeros((3, 224, 224), dtype=np.float32))
+                fetch_failures.append(True)
             else:
-                processed.append(
-                    preprocess_images_batch([raw])[0]  # shape (3, 224, 224)
-                )
-        pixel_values = np.stack(processed, axis=0).astype(np.float32)  # (N, 3, 224, 224)
+                processed.append(preprocess_images_batch([raw])[0])
+                fetch_failures.append(False)
+        pixel_values = np.stack(processed, axis=0).astype(np.float32)
 
         session = self._image_session
 
@@ -338,9 +348,9 @@ class InferenceEngine:
             )
             return outputs[0], outputs[1]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         logits, embeddings = await loop.run_in_executor(None, _run)
-        return logits, embeddings
+        return logits, embeddings, fetch_failures
 
 
 # ---------------------------------------------------------------------------
