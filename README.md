@@ -35,7 +35,8 @@ Inbound Stream (Kafka) ──► Micro-Batching ──► Concurrent Text + Imag
 
 ## ✨ Key Features
 
-- ⚡ **Sub-50ms Multimodal Inference**: Concurrently evaluates text (DistilBERT) and images (ResNet/ViT feature extractor) using multi-threaded ONNX execution providers.
+- ⚡ **Sub-50ms Ultra-Low Latency Inference**: Concurrently evaluates text (DistilBERT) and vision streams using **TensorrtExecutionProvider** with FP16 precision, dynamic shape profiles, and CUDA fallback.
+- 🚀 **Pinned Host Memory & CUDA Streams**: Zero-bottleneck asynchronous DMA memory transfers (`torch.cuda` pinned buffers + non-blocking streams) eliminating CPU-to-GPU transfer overhead.
 - 🛡️ **Multimodal Decision Fusion**: Computes joint toxicity probabilities `max(Text_prob, Image_prob)` with configurable ambiguity bands for automated human review triage.
 - 📐 **128-D L2-Normalized Feature Vectors**: Generates compact embeddings for downstream vector search, toxicity clustering, and semantic deduplication.
 - 📦 **Zero-Data-Loss Kafka Pipeline**: Manual offset management committing offsets to Kafka **only after** successful transactional writes to the PostgreSQL audit log.
@@ -43,6 +44,7 @@ Inbound Stream (Kafka) ──► Micro-Batching ──► Concurrent Text + Imag
 - 🖥️ **Interactive Streamlit Web Dashboard**: Real-time moderation studio, interactive Plotly risk gauges, live streaming simulator, quarantine action queue, and benchmark stress-tester.
 
 ---
+
 
 ## 🖥️ Streamlit Interactive Cockpit
 
