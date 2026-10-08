@@ -460,6 +460,152 @@ with tab_studio:
 
     with studio_col2:
         st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>2. Media Preview & Raw Inspect</h4>", unsafe_allow_html=True)
+
+        preview_col1, preview_col2 = st.columns([1, 1.2])
+        with preview_col1:
+            if current_pil_img is not None:
+                st.image(current_pil_img, caption="224×224 Normalised Input", use_container_width=True)
+        with preview_col2:
+            st.markdown(
+                f"""
+                <div class="glass-card" style="padding: 12px; font-size: 0.85rem;">
+                    <div style="color: #94a3b8; font-weight: 600; margin-bottom: 6px;">PAYLOAD METADATA</div>
+                    <div><b>Length:</b> {len(text_input)} characters</div>
+                    <div><b>Tokens:</b> ~{max(1, len(text_input.split()))} subwords</div>
+                    <div><b>Resolution:</b> 224 × 224 × 3</div>
+                    <div><b>Channels:</b> CHW Tensor (Float32)</div>
+                    <div><b>Target SLA:</b> &lt; 50.0 ms</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # Execute Inference when requested
+    if analyze_button or "last_studio_result" not in st.session_state:
+        raw_img_bytes = image_to_bytes(current_pil_img) if current_pil_img else io.BytesIO().getvalue()
+
+        # Measure precise inference timing
+        t0 = time.perf_counter()
+
+        # Tokenize text
+        tokens = tokenize_batch([text_input])
+
+        # Preprocess image
+        pixel_tensor = preprocess_images_batch([raw_img_bytes])
+
+        # Run ONNX text session
+        text_out = engine._text_session.run(None, {
+            "input_ids": tokens["input_ids"],
+            "attention_mask": tokens["attention_mask"],
+        })
+        text_logits, text_emb = text_out[0], text_out[1]
+
+        # Run ONNX image session
+        image_out = engine._image_session.run(None, {
+            "pixel_values": pixel_tensor,
+        })
+        image_logits, image_emb = image_out[0], image_out[1]
+
+        t_total = (time.perf_counter() - t0) * 1000.0
+
+        # Calculate probabilities
+        text_prob = float(sigmoid(text_logits)[0, 1])
+        image_prob = float(sigmoid(image_logits)[0, 1])
+        fused_confidence = max(text_prob, image_prob)
+
+        # Apply custom decision thresholds
+        if fused_confidence >= toxicity_threshold:
+            decision_label = "Toxic"
+            action_badge = "⛔ REJECT / QUARANTINE"
+            badge_class = "badge-toxic"
+            action_desc = "Content violates safety guidelines. Automatically blocked or escalated."
+        elif abs(fused_confidence - toxicity_threshold) < review_band:
+            decision_label = "Needs Review"
+            action_badge = "🔍 HUMAN REVIEW QUEUE"
+            badge_class = "badge-review"
+            action_desc = "Borderline score within uncertainty band. Sent to moderation team."
+        else:
+            decision_label = "Non-Toxic"
+            action_badge = "✅ APPROVED / SAFE"
+            badge_class = "badge-safe"
+            action_desc = "Content verified safe for live broadcast and public streaming."
+
+        studio_res = {
+            "label": decision_label,
+            "action_badge": action_badge,
+            "badge_class": badge_class,
+            "action_desc": action_desc,
+    st.markdown(
+        """
+        <div class="hero-banner">
+            <h3 style="margin:0 0 6px 0; color: #f8fafc; font-size: 1.25rem;">Multimodal Real-Time Classification</h3>
+            <p style="margin:0; color: #cbd5e1; font-size: 0.9rem;">
+                Test text and image payloads concurrently through parallel ONNX execution graphs. Observe confidence scores, risk radar breakdown, 128-d vector embeddings, and millisecond latency.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    studio_col1, studio_col2 = st.columns([1.1, 0.9], gap="large")
+
+    with studio_col1:
+        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>1. Input Payload & Modality Controls</h4>", unsafe_allow_html=True)
+
+        preset_choice = st.selectbox(
+            "⚡ Quick Load Preset Scenario:",
+            list(PRESET_SCENARIOS.keys()),
+            index=0,
+            help="Select a representative real-world moderation scenario",
+        )
+
+        preset_data = PRESET_SCENARIOS[preset_choice]
+
+        text_input = st.text_area(
+            "📝 Text Payload (Chat / Comment / Post):",
+            value=preset_data["text"],
+            height=95,
+            placeholder="Type or paste chat message here...",
+        )
+
+        img_col1, img_col2 = st.columns([1, 1])
+
+        with img_col1:
+            image_source = st.radio(
+                "🖼️ Image Source Mode:",
+                ["Preset Scenario Graphic", "Upload Local Image", "Synthetic Pattern"],
+                horizontal=True,
+            )
+
+        uploaded_img = None
+        current_pil_img = None
+
+        with img_col2:
+            if image_source == "Preset Scenario Graphic":
+                current_pil_img = generate_synthetic_image(preset_data["image_cat"])
+                st.caption(f"ℹ️ Scenario Graphic: `{preset_data['image_cat']}`")
+            elif image_source == "Upload Local Image":
+                uploaded_file = st.file_uploader("Upload Image (PNG/JPG):", type=["png", "jpg", "jpeg"])
+                if uploaded_file is not None:
+                    current_pil_img = Image.open(uploaded_file).convert("RGB")
+                else:
+                    current_pil_img = generate_synthetic_image("default_avatar")
+            else:
+                synth_type = st.selectbox("Select Pattern:", ["clean_nature", "toxic_flame", "nsfw_flagged", "spam_promo", "default_avatar"])
+                current_pil_img = generate_synthetic_image(synth_type)
+
+        # Threshold configuration
+        with st.expander("⚙️ Decision Thresholds & Sensitivity Tuning", expanded=False):
+            thresh_col1, thresh_col2 = st.columns(2)
+            with thresh_col1:
+                toxicity_threshold = st.slider("Toxicity Decision Threshold:", 0.10, 0.90, 0.50, 0.05)
+            with thresh_col2:
+                review_band = st.slider("Human Review Ambiguity Band (±):", 0.05, 0.25, 0.15, 0.05)
+
+        analyze_button = st.button("⚡ Run Real-Time Multimodal Inference", type="primary", use_container_width=True)
+
+    with studio_col2:
+        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>2. Media Preview & Raw Inspect</h4>", unsafe_allow_html=True)
         
         preview_col1, preview_col2 = st.columns([1, 1.2])
         with preview_col1:
@@ -1049,139 +1195,461 @@ with tab_analytics:
 
 
 # ===========================================================================
-# TAB 4: Engine Benchmarks & Stress Testing
+# TAB 4: Engine Benchmarks & Performance Analysis
 # ===========================================================================
 with tab_benchmark:
     st.markdown(
         """
         <div class="hero-banner">
-            <h3 style="margin:0 0 6px 0; color: #f8fafc; font-size: 1.25rem;">ONNX Engine Throughput & Latency Profiler</h3>
+            <h3 style="margin:0 0 6px 0; color: #f8fafc; font-size: 1.25rem;">Interactive Performance Benchmarks & Analysis</h3>
             <p style="margin:0; color: #cbd5e1; font-size: 0.9rem;">
-                Benchmark multi-threaded inference performance with synthetic payloads. Compute empirical throughput, percentile latency bounds (P50, P95, P99), and verify SLA compliance.
+                Comprehensive benchmark analysis from the StreamShield AI whitepaper. Compare CPU, CUDA, and TensorRT performance across latency, throughput, VRAM footprint, and concurrency scaling.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    bench_col1, bench_col2, bench_col3 = st.columns([1, 1, 1])
-    with bench_col1:
-        bench_batch_size = st.selectbox("Benchmark Batch Size:", [4, 8, 16, 32], index=2)
-    with bench_col2:
-        bench_passes = st.selectbox("Benchmark Passes / Iterations:", [10, 25, 50], index=0)
-    with bench_col3:
-        st.write("")
-        st.write("")
-        run_bench_btn = st.button("🚀 Start Stress Benchmark", type="primary", use_container_width=True)
+    # Whitepaper benchmark data
+    benchmark_data = {
+        "Metric": [
+            "Inference Latency (p50)",
+            "Inference Latency (p90)",
+            "Inference Latency (p99)",
+            "End-to-End Glass-to-Alert (p99)",
+            "Throughput (FPS)",
+            "GPU Memory VRAM (MB)",
+            "PCIe Transfer Overhead (ms)",
+            "Sub-50ms SLA Compliance (%)"
+        ],
+        "PyTorch CPU Baseline": [124.50, 182.10, 310.80, 465.00, 48, 0, 0, 0.0],
+        "PyTorch CUDA FP16": [14.20, 22.40, 38.90, 68.50, 380, 6450, 16.40, 84.2],
+        "StreamShield TensorRT + Zero-Copy": [4.12, 7.85, 12.30, 18.40, 1420, 1840, 0.82, 99.98]
+    }
 
-    if run_bench_btn:
-        progress_bar = st.progress(0, text="Running ONNX benchmark passes...")
-        latencies = []
-        dummy_payloads = [
-            MultimodalPayload(
-                text_content=f"Benchmark dummy payload #{idx} testing ONNX graph throughput",
-                image_url="https://streamshield.ai/bench/img",
-            )
-            for idx in range(bench_batch_size)
-        ]
+    concurrency_data = {
+        "Active Streams": [1, 5, 10, 25, 50, 75, 100],
+        "Aggregate Input (FPS)": [30, 150, 300, 750, 1500, 2250, 3000],
+        "StreamShield Ingestion (FPS)": [30, 150, 300, 750, 1420, 2100, 2800],
+        "Median Latency (p50, ms)": [3.8, 4.1, 4.8, 6.2, 8.9, 14.2, 21.5],
+        "Tail Latency (p99, ms)": [6.2, 7.5, 9.1, 12.4, 18.6, 28.9, 41.2],
+        "GPU Utilization (%)": [8, 16, 28, 54, 89, 98, 100],
+        "VRAM Used (GB)": [1.84, 1.92, 2.10, 2.65, 3.40, 4.20, 5.10],
+        "SLA Breaches (%)": [0.00, 0.00, 0.00, 0.00, 0.01, 0.02, 0.04]
+    }
 
-        total_t0 = time.perf_counter()
-        for p_idx in range(bench_passes):
-            t_pass_start = time.perf_counter()
-            _ = asyncio.run(engine.run_batch(dummy_payloads))
-            t_pass_ms = (time.perf_counter() - t_pass_start) * 1000.0
-            latencies.append(t_pass_ms)
-            progress_bar.progress((p_idx + 1) / bench_passes, text=f"Pass {p_idx + 1}/{bench_passes} — {t_pass_ms:.2f} ms")
+    # Section selection
+    bench_section = st.radio(
+        "Select Benchmark Section:",
+        ["📊 Comparative Performance Matrix", "📈 Concurrency Scaling Analysis", "💾 Memory Footprint Analysis", "⚡ Live Stress Testing"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
 
-        total_elapsed_s = time.perf_counter() - total_t0
-        total_items = bench_passes * bench_batch_size
-        throughput_fps = total_items / total_elapsed_s
+    if bench_section == "📊 Comparative Performance Matrix":
+        st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>CPU vs CUDA vs TensorRT Performance Comparison</h4>", unsafe_allow_html=True)
 
-        st.session_state.benchmark_results = {
-            "latencies": latencies,
-            "batch_size": bench_batch_size,
-            "passes": bench_passes,
-            "total_items": total_items,
-            "throughput_fps": throughput_fps,
-            "p50": np.percentile(latencies, 50),
-            "p95": np.percentile(latencies, 95),
-            "p99": np.percentile(latencies, 99),
-            "mean": np.mean(latencies),
-            "min": np.min(latencies),
-            "max": np.max(latencies),
-        }
-        progress_bar.empty()
+        df_bench = pd.DataFrame(benchmark_data)
+        st.dataframe(df_bench, use_container_width=True, hide_index=True)
 
-    if st.session_state.benchmark_results is not None:
-        b_res = st.session_state.benchmark_results
-
-        bk1, bk2, bk3, bk4 = st.columns(4)
-        with bk1:
-            st.markdown(
-                f"""
-                <div class="glass-card">
-                    <div class="metric-label">THROUGHPUT</div>
-                    <div class="metric-value" style="color: #38bdf8;">{b_res['throughput_fps']:.1f}</div>
-                    <div class="metric-delta" style="color: #94a3b8;">Items / Second</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with bk2:
-            st.markdown(
-                f"""
-                <div class="glass-card">
-                    <div class="metric-label">P50 (MEDIAN) LATENCY</div>
-                    <div class="metric-value" style="color: #34d399;">{b_res['p50']:.2f} ms</div>
-                    <div class="metric-delta" style="color: #94a3b8;">Mean: {b_res['mean']:.2f} ms</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with bk3:
-            st.markdown(
-                f"""
-                <div class="glass-card">
-                    <div class="metric-label">P95 LATENCY</div>
-                    <div class="metric-value" style="color: {'#34d399' if b_res['p95'] < 50 else '#f87171'};">
-                        {b_res['p95']:.2f} ms
-                    </div>
-                    <div class="metric-delta" style="color: #94a3b8;">Target: &lt; 50 ms</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with bk4:
-            st.markdown(
-                f"""
-                <div class="glass-card">
-                    <div class="metric-label">P99 LATENCY</div>
-                    <div class="metric-value" style="color: #fbbf24;">{b_res['p99']:.2f} ms</div>
-                    <div class="metric-delta" style="color: #94a3b8;">Max: {b_res['max']:.2f} ms</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        # Plot latency curve across iterations
-        fig_bench = px.line(
-            x=list(range(1, len(b_res["latencies"]) + 1)),
-            y=b_res["latencies"],
-            markers=True,
-            labels={"x": "Iteration Pass", "y": "Latency (ms)"},
-            title=f"Per-Pass Wall-Clock Latency (Batch Size = {b_res['batch_size']})",
+        # Interactive Latency Comparison Chart
+        latency_metrics = ["Inference Latency (p50)", "Inference Latency (p90)", "Inference Latency (p99)", "End-to-End Glass-to-Alert (p99)"]
+        latency_df = df_bench[df_bench["Metric"].isin(latency_metrics)].melt(
+            id_vars=["Metric"],
+            var_name="Implementation",
+            value_name="Latency (ms)"
         )
-        fig_bench.add_hline(y=50.0, line_dash="dash", line_color="#f43f5e", annotation_text="50ms Target SLA")
-        fig_bench.update_layout(
-            height=300,
+
+        fig_latency = px.bar(
+            latency_df,
+            x="Metric",
+            y="Latency (ms)",
+            color="Implementation",
+            barmode="group",
+            title="Latency Comparison Across Implementations (Lower is Better)",
+            color_discrete_map={
+                "PyTorch CPU Baseline": "#64748b",
+                "PyTorch CUDA FP16": "#38bdf8",
+                "StreamShield TensorRT + Zero-Copy": "#34d399"
+            }
+        )
+        fig_latency.add_hline(y=50.0, line_dash="dash", line_color="#f43f5e", annotation_text="50ms SLA Target")
+        fig_latency.update_layout(
+            height=400,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#94a3b8"),
-            margin=dict(l=10, r=10, t=35, b=15),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        fig_bench.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
-        fig_bench.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_bench, use_container_width=True)
+        fig_latency.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+        fig_latency.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_latency, use_container_width=True)
+
+        # Throughput Comparison
+        throughput_df = df_bench[df_bench["Metric"] == "Throughput (FPS)"].melt(
+            id_vars=["Metric"],
+            var_name="Implementation",
+            value_name="Throughput (FPS)"
+        )
+
+        fig_throughput = px.bar(
+            throughput_df,
+            x="Implementation",
+            y="Throughput (FPS)",
+            title="Throughput Comparison (Higher is Better)",
+            color="Implementation",
+            color_discrete_map={
+                "PyTorch CPU Baseline": "#64748b",
+                "PyTorch CUDA FP16": "#38bdf8",
+                "StreamShield TensorRT + Zero-Copy": "#34d399"
+            }
+        )
+        fig_throughput.update_traces(texttemplate='%{y:.0f}', textposition='outside')
+        fig_throughput.update_layout(
+            height=350,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            showlegend=False
+        )
+        fig_throughput.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+        fig_throughput.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_throughput, use_container_width=True)
+
+        # Performance Radar Chart
+        performance_categories = ["Latency (inv)", "Throughput", "VRAM Efficiency", "SLA Compliance"]
+        performance_values = {
+            "PyTorch CPU Baseline": [1/124.50 * 100, 48/1420 * 100, 0, 0],
+            "PyTorch CUDA FP16": [1/14.20 * 100, 380/1420 * 100, 6450/1840 * 100, 84.2],
+            "StreamShield TensorRT + Zero-Copy": [1/4.12 * 100, 1420/1420 * 100, 1840/1840 * 100, 99.98]
+        }
+
+        radar_df = pd.DataFrame(performance_values, index=performance_categories).T.reset_index()
+        radar_df = radar_df.rename(columns={"index": "Implementation"})
+
+        fig_radar = go.Figure()
+        for impl in radar_df["Implementation"]:
+            fig_radar.add_trace(go.Scatterpolar(
+                r=radar_df[radar_df["Implementation"] == impl].iloc[0, 1:].values,
+                theta=performance_categories,
+                fill='toself',
+                name=impl,
+                line_color={
+                    "PyTorch CPU Baseline": "#64748b",
+                    "PyTorch CUDA FP16": "#38bdf8",
+                    "StreamShield TensorRT + Zero-Copy": "#34d399"
+                }[impl]
+            ))
+
+        fig_radar.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 100])
+            ),
+            title="Normalized Performance Radar (Higher is Better)",
+            height=450,
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+    elif bench_section == "📈 Concurrency Scaling Analysis":
+        st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>Concurrency Scaling: 1 to 100 Simultaneous Streams</h4>", unsafe_allow_html=True)
+
+        df_concurrency = pd.DataFrame(concurrency_data)
+        st.dataframe(df_concurrency, use_container_width=True, hide_index=True)
+
+        # Latency vs Concurrent Streams
+        fig_latency_scale = go.Figure()
+        fig_latency_scale.add_trace(go.Scatter(
+            x=df_concurrency["Active Streams"],
+            y=df_concurrency["Median Latency (p50, ms)"],
+            mode='lines+markers',
+            name='Median (p50)',
+            line=dict(color='#34d399', width=3)
+        ))
+        fig_latency_scale.add_trace(go.Scatter(
+            x=df_concurrency["Active Streams"],
+            y=df_concurrency["Tail Latency (p99, ms)"],
+            mode='lines+markers',
+            name='Tail (p99)',
+            line=dict(color='#f87171', width=3)
+        ))
+        fig_latency_scale.add_hline(y=50.0, line_dash="dash", line_color="#f43f5e", annotation_text="50ms SLA Ceiling")
+        fig_latency_scale.update_layout(
+            title="Latency Scaling with Concurrent Streams",
+            xaxis_title="Active Streams",
+            yaxis_title="Latency (ms)",
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig_latency_scale.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+        fig_latency_scale.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_latency_scale, use_container_width=True)
+
+        # Throughput vs Concurrent Streams
+        fig_throughput_scale = go.Figure()
+        fig_throughput_scale.add_trace(go.Scatter(
+            x=df_concurrency["Active Streams"],
+            y=df_concurrency["Aggregate Input (FPS)"],
+            mode='lines+markers',
+            name='Aggregate Input',
+            line=dict(color='#64748b', width=2, dash='dash')
+        ))
+        fig_throughput_scale.add_trace(go.Scatter(
+            x=df_concurrency["Active Streams"],
+            y=df_concurrency["StreamShield Ingestion (FPS)"],
+            mode='lines+markers',
+            name='StreamShield Ingestion',
+            line=dict(color='#38bdf8', width=3)
+        ))
+        fig_throughput_scale.update_layout(
+            title="Throughput Scaling with Concurrent Streams",
+            xaxis_title="Active Streams",
+            yaxis_title="Throughput (FPS)",
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig_throughput_scale.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+        fig_throughput_scale.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_throughput_scale, use_container_width=True)
+
+        # GPU Utilization & VRAM Scaling
+        fig_resource = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=("GPU Utilization (%)", "VRAM Used (GB)"),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}]]
+        )
+
+        fig_resource.add_trace(
+            go.Scatter(x=df_concurrency["Active Streams"], y=df_concurrency["GPU Utilization (%)"],
+                      mode='lines+markers', name='GPU Utilization', line=dict(color='#a855f7', width=3)),
+            row=1, col=1
+        )
+        fig_resource.add_trace(
+            go.Scatter(x=df_concurrency["Active Streams"], y=df_concurrency["VRAM Used (GB)"],
+                      mode='lines+markers', name='VRAM Used', line=dict(color='#f59e0b', width=3)),
+            row=1, col=2
+        )
+
+        fig_resource.update_xaxes(title_text="Active Streams", row=1, col=1)
+        fig_resource.update_xaxes(title_text="Active Streams", row=1, col=2)
+        fig_resource.update_yaxes(title_text="Utilization (%)", row=1, col=1)
+        fig_resource.update_yaxes(title_text="VRAM (GB)", row=1, col=2)
+
+        fig_resource.update_layout(
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            showlegend=False
+        )
+        fig_resource.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+        fig_resource.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_resource, use_container_width=True)
+
+    elif bench_section == "💾 Memory Footprint Analysis":
+        st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>GPU Memory VRAM Footprint Comparison</h4>", unsafe_allow_html=True)
+
+        memory_data = {
+            "Component": [
+                "Pinned Host Buffer",
+                "GPU Tensor Buffers (FP16)",
+                "Vision TensorRT Engine",
+                "Text TensorRT Engine",
+                "Audio TensorRT Engine",
+                "TensorRT Workspace",
+                "CUDA Context Overhead",
+                "ONNX Runtime Session",
+                "Pre-allocated Tensor Pool",
+                "Misc. (Activations)"
+            ],
+            "StreamShield (MB)": [96, 48, 42, 152, 39, 256, 128, 64, 128, 867],
+            "PyTorch CUDA (MB)": [96, 96, 392, 392, 74, 512, 256, 512, 2400, 1920]
+        }
+
+        df_memory = pd.DataFrame(memory_data)
+        st.dataframe(df_memory, use_container_width=True, hide_index=True)
+
+        # Memory Breakdown Stacked Bar
+        fig_memory = go.Figure()
+        fig_memory.add_trace(go.Bar(
+            name="StreamShield TensorRT",
+            x=df_memory["Component"],
+            y=df_memory["StreamShield (MB)"],
+            marker_color="#34d399"
+        ))
+        fig_memory.add_trace(go.Bar(
+            name="PyTorch CUDA Standard",
+            x=df_memory["Component"],
+            y=df_memory["PyTorch CUDA (MB)"],
+            marker_color="#38bdf8"
+        ))
+
+        fig_memory.update_layout(
+            barmode='group',
+            title="Memory Footprint Breakdown by Component",
+            xaxis_title="Component",
+            yaxis_title="Memory (MB)",
+            height=450,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig_memory.update_xaxes(gridcolor="rgba(255,255,255,0.05)", tickangle=45)
+        fig_memory.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_memory, use_container_width=True)
+
+        # Total Memory Comparison
+        total_streamshield = df_memory["StreamShield (MB)"].sum()
+        total_pytorch = df_memory["PyTorch CUDA (MB)"].sum()
+        savings_pct = ((total_pytorch - total_streamshield) / total_pytorch) * 100
+
+        fig_total_memory = go.Figure(data=[
+            go.Bar(name='StreamShield TensorRT', x=['Total VRAM'], y=[total_streamshield], marker_color="#34d399"),
+            go.Bar(name='PyTorch CUDA Standard', x=['Total VRAM'], y=[total_pytorch], marker_color="#38bdf8")
+        ])
+        fig_total_memory.update_layout(
+            barmode='group',
+            title=f"Total VRAM Footprint: {savings_pct:.1f}% Reduction with StreamShield",
+            yaxis_title="Total Memory (MB)",
+            height=350,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"),
+            showlegend=True
+        )
+        fig_total_memory.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+        st.plotly_chart(fig_total_memory, use_container_width=True)
+
+    elif bench_section == "⚡ Live Stress Testing":
+        st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>Live ONNX Engine Stress Testing</h4>", unsafe_allow_html=True)
+
+        bench_col1, bench_col2, bench_col3 = st.columns([1, 1, 1])
+        with bench_col1:
+            bench_batch_size = st.selectbox("Benchmark Batch Size:", [4, 8, 16, 32], index=2)
+        with bench_col2:
+            bench_passes = st.selectbox("Benchmark Passes / Iterations:", [10, 25, 50], index=0)
+        with bench_col3:
+            st.write("")
+            st.write("")
+            run_bench_btn = st.button("🚀 Start Stress Benchmark", type="primary", use_container_width=True)
+
+        if run_bench_btn:
+            progress_bar = st.progress(0, text="Running ONNX benchmark passes...")
+            latencies = []
+            dummy_payloads = [
+                MultimodalPayload(
+                    text_content=f"Benchmark dummy payload #{idx} testing ONNX graph throughput",
+                    image_url="https://streamshield.ai/bench/img",
+                )
+                for idx in range(bench_batch_size)
+            ]
+
+            total_t0 = time.perf_counter()
+            for p_idx in range(bench_passes):
+                t_pass_start = time.perf_counter()
+                _ = asyncio.run(engine.run_batch(dummy_payloads))
+                t_pass_ms = (time.perf_counter() - t_pass_start) * 1000.0
+                latencies.append(t_pass_ms)
+                progress_bar.progress((p_idx + 1) / bench_passes, text=f"Pass {p_idx + 1}/{bench_passes} — {t_pass_ms:.2f} ms")
+
+            total_elapsed_s = time.perf_counter() - total_t0
+            total_items = bench_passes * bench_batch_size
+            throughput_fps = total_items / total_elapsed_s
+
+            st.session_state.benchmark_results = {
+                "latencies": latencies,
+                "batch_size": bench_batch_size,
+                "passes": bench_passes,
+                "total_items": total_items,
+                "throughput_fps": throughput_fps,
+                "p50": np.percentile(latencies, 50),
+                "p95": np.percentile(latencies, 95),
+                "p99": np.percentile(latencies, 99),
+                "mean": np.mean(latencies),
+                "min": np.min(latencies),
+                "max": np.max(latencies),
+            }
+            progress_bar.empty()
+
+        if st.session_state.benchmark_results is not None:
+            b_res = st.session_state.benchmark_results
+
+            bk1, bk2, bk3, bk4 = st.columns(4)
+            with bk1:
+                st.markdown(
+                    f"""
+                    <div class="glass-card">
+                        <div class="metric-label">THROUGHPUT</div>
+                        <div class="metric-value" style="color: #38bdf8;">{b_res['throughput_fps']:.1f}</div>
+                        <div class="metric-delta" style="color: #94a3b8;">Items / Second</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with bk2:
+                st.markdown(
+                    f"""
+                    <div class="glass-card">
+                        <div class="metric-label">P50 (MEDIAN) LATENCY</div>
+                        <div class="metric-value" style="color: #34d399;">{b_res['p50']:.2f} ms</div>
+                        <div class="metric-delta" style="color: #94a3b8;">Mean: {b_res['mean']:.2f} ms</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with bk3:
+                st.markdown(
+                    f"""
+                    <div class="glass-card">
+                        <div class="metric-label">P95 LATENCY</div>
+                        <div class="metric-value" style="color: {'#34d399' if b_res['p95'] < 50 else '#f87171'};">
+                            {b_res['p95']:.2f} ms
+                        </div>
+                        <div class="metric-delta" style="color: #94a3b8;">Target: &lt; 50 ms</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with bk4:
+                st.markdown(
+                    f"""
+                    <div class="glass-card">
+                        <div class="metric-label">P99 LATENCY</div>
+                        <div class="metric-value" style="color: #fbbf24;">{b_res['p99']:.2f} ms</div>
+                        <div class="metric-delta" style="color: #94a3b8;">Max: {b_res['max']:.2f} ms</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            # Plot latency curve across iterations
+            fig_bench = px.line(
+                x=list(range(1, len(b_res["latencies"]) + 1)),
+                y=b_res["latencies"],
+                markers=True,
+                labels={"x": "Iteration Pass", "y": "Latency (ms)"},
+                title=f"Per-Pass Wall-Clock Latency (Batch Size = {b_res['batch_size']})",
+            )
+            fig_bench.add_hline(y=50.0, line_dash="dash", line_color="#f43f5e", annotation_text="50ms Target SLA")
+            fig_bench.update_layout(
+                height=300,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#94a3b8"),
+                margin=dict(l=10, r=10, t=35, b=15),
+            )
+            fig_bench.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+            fig_bench.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+            st.plotly_chart(fig_bench, use_container_width=True)
 
 
 # ===========================================================================

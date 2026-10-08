@@ -14,7 +14,7 @@
 
 **Ultra-Low Latency (<50ms) Multimodal Live-Stream Moderation & Streaming Intelligence Engine**
 
-*Sub-50ms Glass-to-Alert Ingestion via WebRTC & RTSP, Zero-Copy GPU DMA Pinned Host Memory, TensorRT FP16 Acceleration, and Interactive Streamlit Cockpit.*
+*Sub-50ms Glass-to-Alert Ingestion via WebRTC & RTSP, Zero-Copy GPU DMA Pinned Host Memory, TensorRT FP16 Acceleration, and Interactive Streamlit Cockpit with Plotly Visualizations.*
 
 [🚀 Quickstart](#-quickstart) • [✨ Key Capabilities](#-key-capabilities) • [🖥️ Streamlit Cockpit](#️-interactive-streamlit-cockpit) • [📡 WebRTC & RTSP Server](#-webrtc--rtsp-real-time-ingestion-server) • [🏗️ Architecture](#️-system-architecture) • [📊 Benchmarks](#-benchmarks--performance) • [📄 Whitepaper](docs/PERFORMANCE_WHITEPAPER.md)
 
@@ -122,7 +122,11 @@ StreamShield AI includes a modern, dark-mode glassmorphic web cockpit built with
 1. **🛡️ Live Moderation Studio**: Interactive scoring with preset scenarios (Wholesome Gaming, Toxic Harassment, NSFW Media, Spam Scam, Sarcasm), Plotly risk radar gauges, and 128-D vector visualizations.
 2. **⚡ Stream Pipeline Simulator**: High-frequency streaming generator with real-time quarantine queues and moderator override actions (*Clear, Escalate, Flag*).
 3. **📊 Analytics & Audit Logs**: Historical compliance logs synced with PostgreSQL and 1-click CSV audit trail export.
-4. **🚀 Engine Benchmarks**: Live stress-testing harness computing empirical throughput (FPS) and percentile latency curves (P50, P90, P99).
+4. **🚀 Interactive Benchmarks**: Comprehensive performance analysis with interactive Plotly charts comparing CPU, CUDA, and TensorRT implementations:
+   - **Comparative Performance Matrix**: Latency, throughput, VRAM footprint, and SLA compliance comparisons
+   - **Concurrency Scaling Analysis**: 1 to 100 simultaneous streams with latency and throughput curves
+   - **Memory Footprint Analysis**: Detailed VRAM breakdown by component
+   - **Live Stress Testing**: Real-time ONNX engine benchmarking with percentile latency analysis
 
 ---
 
