@@ -170,6 +170,12 @@ class PinnedFrameBatchBuffer:
             transfer_ms = (time.perf_counter() - transfer_start) * 1000.0
             return normalized_cpu, fetch_failures, transfer_ms
 
+    def pin_host_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Register or allocate page-locked (pinned) host memory for arbitrary tensors (torch.cuda.HostRegister equivalent)."""
+        if self.cuda_available and not tensor.is_pinned():
+            return tensor.pin_memory()
+        return tensor
+
 
 # ---------------------------------------------------------------------------
 # High-Performance ONNX & TensorRT Inference Engine

@@ -23,3 +23,9 @@ streamlit>=1.35.0
 plotly>=5.22.0
 pandas>=2.2.0
 
+# Real-time WebRTC & RTSP Stream Ingestion
+aiortc>=1.8.0
+av>=12.0.0
+fastapi>=0.111.0
+uvicorn>=0.30.0
+websockets>=12.0

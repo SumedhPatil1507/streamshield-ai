@@ -2,10 +2,14 @@
 
 import asyncio
 import os
+import sys
+from pathlib import Path
 import unittest
 import numpy as np
 import torch
 from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Ensure offline mode for test suite
 os.environ["STREAMSHIELD_OFFLINE"] = "1"
@@ -37,6 +41,11 @@ class TestPinnedFrameBatchBuffer(unittest.TestCase):
         self.assertEqual(tensor_frames.shape, (3, 3, 224, 224))
         self.assertEqual(failures, [False, False, False])
         self.assertGreaterEqual(transfer_ms, 0.0)
+
+    def test_pin_host_tensor(self):
+        t = torch.randn(2, 3, 224, 224)
+        pinned = self.buffer.pin_host_tensor(t)
+        self.assertEqual(pinned.shape, t.shape)
 
 
 class TestUltraLowLatencyInferenceEngine(unittest.IsolatedAsyncioTestCase):
