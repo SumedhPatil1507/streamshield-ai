@@ -25,7 +25,6 @@ The StreamShield AI app is now ready for deployment to Streamlit Cloud. Follow t
 
 The deployment will automatically:
 - Install dependencies from `requirements-streamlit.txt`
-- Install system packages from `packages.txt` (ffmpeg for video processing)
 - Use the Streamlit configuration from `.streamlit/config.toml`
 - Launch the app in offline mode with synthetic data
 
@@ -37,9 +36,6 @@ The deployment will automatically:
 - Custom dark theme configuration
 - Streamlit server settings for production deployment
 - Client-side error handling enabled
-
-### `packages.txt`
-- System-level dependencies (ffmpeg for video/audio processing)
 
 ### `requirements-streamlit.txt`
 - Streamlit Cloud-specific Python dependencies
@@ -130,6 +126,12 @@ For live WebRTC/RTSP integration:
 ---
 
 ## Troubleshooting
+
+### packages.txt Installation Errors
+
+**Error**: `Unable to locate package` errors for comment lines
+
+**Solution**: The `packages.txt` file should only contain package names, one per line, without comments. For the StreamShield dashboard, no system packages are needed since it runs in simulation mode. The file has been removed from the repository.
 
 ### Deployment Fails
 
