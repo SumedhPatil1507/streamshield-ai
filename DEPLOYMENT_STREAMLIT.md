@@ -24,7 +24,7 @@ The StreamShield AI app is now ready for deployment to Streamlit Cloud. Follow t
 5. **Click "Deploy"**
 
 The deployment will automatically:
-- Install dependencies from `requirements-streamlit.txt`
+- Install dependencies from `requirements.txt`
 - Use the Streamlit configuration from `.streamlit/config.toml`
 - Launch the app in offline mode with synthetic data
 
@@ -37,8 +37,8 @@ The deployment will automatically:
 - Streamlit server settings for production deployment
 - Client-side error handling enabled
 
-### `requirements-streamlit.txt`
-- Streamlit Cloud-specific Python dependencies
+### `requirements.txt`
+- Python dependencies for the dashboard and inference layer
 - Excludes Kafka, PostgreSQL, and WebRTC dependencies not needed for the dashboard
 - Includes core inference and visualization libraries
 
@@ -121,7 +121,7 @@ os.environ["STREAMSHIELD_API_KEY"] = "your-api-key"
 For live WebRTC/RTSP integration:
 1. Deploy the backend API server separately (e.g., on Render, Railway, or Kubernetes)
 2. Update the app to connect to your backend endpoint
-3. Use `requirements.txt` instead of `requirements-streamlit.txt` for full dependencies
+3. Use `requirements-full.txt` instead of `requirements.txt` for full dependencies
 
 ---
 
@@ -144,14 +144,14 @@ streamshield-ai/
 ├── src/
 │   ├── models/
 │   └── streaming/
-└── requirements-streamlit.txt
+└── requirements.txt
 ```
 
 ### App Crashes on Startup
 
 **Error**: Import errors or missing dependencies
 
-**Solution**: Check that `requirements-streamlit.txt` includes all necessary packages. The current version includes:
+**Solution**: Check that `requirements.txt` includes all necessary packages. The current version includes:
 - streamlit
 - plotly
 - pandas

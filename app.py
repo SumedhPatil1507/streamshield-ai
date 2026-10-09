@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+# NOTE: onnxruntime MUST be imported before pandas in this environment.
+# Importing pandas first and onnxruntime afterwards crashes the process with
+# a native access violation (0xC0000005), while the reverse order is stable.
+# Verified locally with pandas 2.2.3 / onnxruntime 1.30.0 / numpy 2.5.3.
+import onnxruntime  # noqa: F401  # isort: skip
+
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import plotly.express as px
@@ -41,6 +48,23 @@ from src.models.inference import (
 from src.models.model_utils import normalize_l2, sigmoid
 from src.streaming.config import settings
 from src.streaming.schemas import MultimodalPayload
+
+# ---------------------------------------------------------------------------
+# Global Plotly configuration — makes every chart in the cockpit fully
+# interactive: scroll-zoom, pan, box/lasso selection, hover compare, and
+# 2x-resolution PNG export from the floating modebar.
+# ---------------------------------------------------------------------------
+PLOT_CFG = {
+    "displaylogo": False,
+    "scrollZoom": True,
+    "responsive": True,
+    "displayModeBar": "hover",
+    "toImageButtonOptions": {
+        "format": "png",
+        "filename": "streamshield_chart",
+        "scale": 2,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Custom CSS for Sleek Dark Glassmorphism Styling
@@ -201,6 +225,45 @@ st.markdown(
         padding: 8px 18px;
         font-weight: 600;
     }
+
+    /* Animated hero banner glow */
+    @keyframes heroPulse {
+        0%, 100% { box-shadow: 0 10px 30px rgba(99, 102, 241, 0.12); }
+        50% { box-shadow: 0 10px 44px rgba(14, 165, 233, 0.28); }
+    }
+    .hero-banner { animation: heroPulse 7s ease-in-out infinite; }
+
+    /* Pulsing LIVE indicator for Auto-Live streaming mode */
+    .live-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 14px;
+        border-radius: 9999px;
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.45);
+        color: #f87171;
+        font-weight: 700;
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    .live-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ef4444;
+        animation: livePulse 1.4s infinite;
+    }
+    @keyframes livePulse {
+        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+        70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+
+    /* Plotly modebar (zoom / pan / export controls) theming */
+    .modebar-container svg { fill: #94a3b8 !important; }
+    .modebar-btn:hover svg, .modebar-btn.active svg { fill: #38bdf8 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -331,6 +394,35 @@ PRESET_SCENARIOS = {
         "desc": "Subtle sarcasm requiring contextual human review",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Decision engine — pure function of fused confidence + threshold controls so
+# the verdict card can be recomputed live whenever a slider moves (no model
+# re-inference required).
+# ---------------------------------------------------------------------------
+def decide_verdict(confidence: float, threshold: float, band: float) -> dict:
+    """Map a fused confidence score to a moderation verdict and action badge."""
+    if confidence >= threshold:
+        return {
+            "label": "Toxic",
+            "action_badge": "⛔ REJECT / QUARANTINE",
+            "badge_class": "badge-toxic",
+            "action_desc": "Content violates safety guidelines. Automatically blocked or escalated.",
+        }
+    if abs(confidence - threshold) < band:
+        return {
+            "label": "Needs Review",
+            "action_badge": "🔍 HUMAN REVIEW QUEUE",
+            "badge_class": "badge-review",
+            "action_desc": "Borderline score within uncertainty band. Sent to moderation team.",
+        }
+    return {
+        "label": "Non-Toxic",
+        "action_badge": "✅ APPROVED / SAFE",
+        "badge_class": "badge-safe",
+        "action_desc": "Content verified safe for live broadcast and public streaming.",
+    }
 
 # ---------------------------------------------------------------------------
 # Top Header & System Cockpit Bar
@@ -513,174 +605,11 @@ with tab_studio:
         image_prob = float(sigmoid(image_logits)[0, 1])
         fused_confidence = max(text_prob, image_prob)
 
-        # Apply custom decision thresholds
-        if fused_confidence >= toxicity_threshold:
-            decision_label = "Toxic"
-            action_badge = "⛔ REJECT / QUARANTINE"
-            badge_class = "badge-toxic"
-            action_desc = "Content violates safety guidelines. Automatically blocked or escalated."
-        elif abs(fused_confidence - toxicity_threshold) < review_band:
-            decision_label = "Needs Review"
-            action_badge = "🔍 HUMAN REVIEW QUEUE"
-            badge_class = "badge-review"
-            action_desc = "Borderline score within uncertainty band. Sent to moderation team."
-        else:
-            decision_label = "Non-Toxic"
-            action_badge = "✅ APPROVED / SAFE"
-            badge_class = "badge-safe"
-            action_desc = "Content verified safe for live broadcast and public streaming."
+        # Compute verdict from the current threshold controls
+        decision = decide_verdict(fused_confidence, toxicity_threshold, review_band)
 
         studio_res = {
-            "label": decision_label,
-            "action_badge": action_badge,
-            "badge_class": badge_class,
-            "action_desc": action_desc,
-    st.markdown(
-        """
-        <div class="hero-banner">
-            <h3 style="margin:0 0 6px 0; color: #f8fafc; font-size: 1.25rem;">Multimodal Real-Time Classification</h3>
-            <p style="margin:0; color: #cbd5e1; font-size: 0.9rem;">
-                Test text and image payloads concurrently through parallel ONNX execution graphs. Observe confidence scores, risk radar breakdown, 128-d vector embeddings, and millisecond latency.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    studio_col1, studio_col2 = st.columns([1.1, 0.9], gap="large")
-
-    with studio_col1:
-        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>1. Input Payload & Modality Controls</h4>", unsafe_allow_html=True)
-
-        preset_choice = st.selectbox(
-            "⚡ Quick Load Preset Scenario:",
-            list(PRESET_SCENARIOS.keys()),
-            index=0,
-            help="Select a representative real-world moderation scenario",
-        )
-
-        preset_data = PRESET_SCENARIOS[preset_choice]
-
-        text_input = st.text_area(
-            "📝 Text Payload (Chat / Comment / Post):",
-            value=preset_data["text"],
-            height=95,
-            placeholder="Type or paste chat message here...",
-        )
-
-        img_col1, img_col2 = st.columns([1, 1])
-
-        with img_col1:
-            image_source = st.radio(
-                "🖼️ Image Source Mode:",
-                ["Preset Scenario Graphic", "Upload Local Image", "Synthetic Pattern"],
-                horizontal=True,
-            )
-
-        uploaded_img = None
-        current_pil_img = None
-
-        with img_col2:
-            if image_source == "Preset Scenario Graphic":
-                current_pil_img = generate_synthetic_image(preset_data["image_cat"])
-                st.caption(f"ℹ️ Scenario Graphic: `{preset_data['image_cat']}`")
-            elif image_source == "Upload Local Image":
-                uploaded_file = st.file_uploader("Upload Image (PNG/JPG):", type=["png", "jpg", "jpeg"])
-                if uploaded_file is not None:
-                    current_pil_img = Image.open(uploaded_file).convert("RGB")
-                else:
-                    current_pil_img = generate_synthetic_image("default_avatar")
-            else:
-                synth_type = st.selectbox("Select Pattern:", ["clean_nature", "toxic_flame", "nsfw_flagged", "spam_promo", "default_avatar"])
-                current_pil_img = generate_synthetic_image(synth_type)
-
-        # Threshold configuration
-        with st.expander("⚙️ Decision Thresholds & Sensitivity Tuning", expanded=False):
-            thresh_col1, thresh_col2 = st.columns(2)
-            with thresh_col1:
-                toxicity_threshold = st.slider("Toxicity Decision Threshold:", 0.10, 0.90, 0.50, 0.05)
-            with thresh_col2:
-                review_band = st.slider("Human Review Ambiguity Band (±):", 0.05, 0.25, 0.15, 0.05)
-
-        analyze_button = st.button("⚡ Run Real-Time Multimodal Inference", type="primary", use_container_width=True)
-
-    with studio_col2:
-        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>2. Media Preview & Raw Inspect</h4>", unsafe_allow_html=True)
-        
-        preview_col1, preview_col2 = st.columns([1, 1.2])
-        with preview_col1:
-            if current_pil_img is not None:
-                st.image(current_pil_img, caption="224×224 Normalised Input", use_container_width=True)
-        with preview_col2:
-            st.markdown(
-                f"""
-                <div class="glass-card" style="padding: 12px; font-size: 0.85rem;">
-                    <div style="color: #94a3b8; font-weight: 600; margin-bottom: 6px;">PAYLOAD METADATA</div>
-                    <div><b>Length:</b> {len(text_input)} characters</div>
-                    <div><b>Tokens:</b> ~{max(1, len(text_input.split()))} subwords</div>
-                    <div><b>Resolution:</b> 224 × 224 × 3</div>
-                    <div><b>Channels:</b> CHW Tensor (Float32)</div>
-                    <div><b>Target SLA:</b> &lt; 50.0 ms</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # Execute Inference when requested
-    if analyze_button or "last_studio_result" not in st.session_state:
-        raw_img_bytes = image_to_bytes(current_pil_img) if current_pil_img else io.BytesIO().getvalue()
-
-        # Measure precise inference timing
-        t0 = time.perf_counter()
-        
-        # Tokenize text
-        tokens = tokenize_batch([text_input])
-        
-        # Preprocess image
-        pixel_tensor = preprocess_images_batch([raw_img_bytes])
-
-        # Run ONNX text session
-        text_out = engine._text_session.run(None, {
-            "input_ids": tokens["input_ids"],
-            "attention_mask": tokens["attention_mask"],
-        })
-        text_logits, text_emb = text_out[0], text_out[1]
-
-        # Run ONNX image session
-        image_out = engine._image_session.run(None, {
-            "pixel_values": pixel_tensor,
-        })
-        image_logits, image_emb = image_out[0], image_out[1]
-
-        t_total = (time.perf_counter() - t0) * 1000.0
-
-        # Calculate probabilities
-        text_prob = float(sigmoid(text_logits)[0, 1])
-        image_prob = float(sigmoid(image_logits)[0, 1])
-        fused_confidence = max(text_prob, image_prob)
-
-        # Apply custom decision thresholds
-        if fused_confidence >= toxicity_threshold:
-            decision_label = "Toxic"
-            action_badge = "⛔ REJECT / QUARANTINE"
-            badge_class = "badge-toxic"
-            action_desc = "Content violates safety guidelines. Automatically blocked or escalated."
-        elif abs(fused_confidence - toxicity_threshold) < review_band:
-            decision_label = "Needs Review"
-            action_badge = "🔍 HUMAN REVIEW QUEUE"
-            badge_class = "badge-review"
-            action_desc = "Borderline score within uncertainty band. Sent to moderation team."
-        else:
-            decision_label = "Non-Toxic"
-            action_badge = "✅ APPROVED / SAFE"
-            badge_class = "badge-safe"
-            action_desc = "Content verified safe for live broadcast and public streaming."
-
-        studio_res = {
-            "label": decision_label,
-            "action_badge": action_badge,
-            "badge_class": badge_class,
-            "action_desc": action_desc,
+            **decision,
             "confidence": fused_confidence,
             "text_confidence": text_prob,
             "image_confidence": image_prob,
@@ -695,7 +624,7 @@ with tab_studio:
         audit_entry = {
             "id": f"pay_{len(st.session_state.audit_history) + 1:04d}",
             "text": text_input[:45] + ("..." if len(text_input) > 45 else ""),
-            "label": decision_label,
+            "label": decision["label"],
             "confidence": fused_confidence,
             "text_conf": text_prob,
             "image_conf": image_prob,
@@ -704,8 +633,10 @@ with tab_studio:
         }
         st.session_state.audit_history.append(audit_entry)
 
-    # Render Results Section
-    res = st.session_state.last_studio_result
+    # Render Results Section — the verdict is recomputed live from the current
+    # threshold sliders, so moving them updates the card without re-inference.
+    res = dict(st.session_state.last_studio_result)
+    res.update(decide_verdict(res["confidence"], toxicity_threshold, review_band))
     st.markdown("<hr style='border: none; border-top: 1px solid rgba(255, 255, 255, 0.08); margin: 1.2rem 0;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='color: #f1f5f9; margin-bottom: 12px;'>📊 Inference Verdict & Diagnostic Analytics</h3>", unsafe_allow_html=True)
 
@@ -839,42 +770,66 @@ with tab_studio:
         fig_gauges.update_yaxes(range=[0, 105], gridcolor="rgba(255,255,255,0.05)", row=1, col=2)
         fig_gauges.update_xaxes(gridcolor="rgba(255,255,255,0.05)", row=1, col=2)
 
-        st.plotly_chart(fig_gauges, use_container_width=True)
+        st.plotly_chart(fig_gauges, width="stretch", config=PLOT_CFG)
 
     with chart_col2:
-        # 128-D Normalized Embedding Spectrum
-        text_emb_slice = res["text_emb"][:32]
-        img_emb_slice = res["image_emb"][:32]
+        # 128-D Normalized Embedding Spectrum — explore any dimension window
+        st.markdown(
+            "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom: 2px;'>"
+            "<span style='color:#e2e8f0; font-weight:600;'>🧬 Embedding Spectrum Explorer</span>"
+            "<span style='color:#94a3b8; font-size:0.78rem;'>128-d L2-normalized</span></div>",
+            unsafe_allow_html=True,
+        )
+        emb_dim_range = st.slider(
+            "Dimension Window:",
+            min_value=0,
+            max_value=124,
+            value=(0, 32),
+            step=4,
+            key="emb_dim_window",
+            help="Slide to inspect any window of the 128-dimensional text & image feature vectors.",
+        )
+        dim_start, dim_end = emb_dim_range
+        if dim_end - dim_start < 4:
+            dim_end = min(128, dim_start + 4)
+        dim_idx = list(range(dim_start, dim_end))
+        text_emb_slice = res["text_emb"][dim_start:dim_end]
+        img_emb_slice = res["image_emb"][dim_start:dim_end]
 
         fig_emb = go.Figure()
         fig_emb.add_trace(go.Scatter(
+            x=dim_idx,
             y=text_emb_slice,
             mode="lines+markers",
             name="Text Embedding (128-d)",
             line=dict(color="#818cf8", width=2),
-            marker=dict(size=4),
+            marker=dict(size=5, line=dict(width=1, color="#c7d2fe")),
+            hovertemplate="dim %{x}<br>text: %{y:.4f}<extra></extra>",
         ))
         fig_emb.add_trace(go.Scatter(
+            x=dim_idx,
             y=img_emb_slice,
             mode="lines+markers",
             name="Image Embedding (128-d)",
             line=dict(color="#38bdf8", width=2),
-            marker=dict(size=4),
+            marker=dict(size=5, line=dict(width=1, color="#bae6fd")),
+            hovertemplate="dim %{x}<br>image: %{y:.4f}<extra></extra>",
         ))
 
         fig_emb.update_layout(
-            title="L2-Normalized Feature Vectors (First 32 Dimensions)",
+            title=f"L2-Normalized Feature Vectors (Dimensions {dim_start}–{dim_end})",
             height=280,
             margin=dict(l=15, r=15, t=35, b=20),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
             font=dict(color="#94a3b8"),
+            hovermode="x unified",
         )
         fig_emb.update_xaxes(title_text="Dimension Index", gridcolor="rgba(255,255,255,0.05)")
         fig_emb.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
 
-        st.plotly_chart(fig_emb, use_container_width=True)
+        st.plotly_chart(fig_emb, width="stretch", config=PLOT_CFG)
 
 
 # ===========================================================================
@@ -906,6 +861,29 @@ with tab_stream:
         st.write("")
         trigger_stream = st.button("⚡ Inject Stream Traffic", type="primary", use_container_width=True)
 
+    # Auto-Live controls: continuous micro-batch ingestion with auto-refreshing charts
+    auto_col1, auto_col2, auto_col3 = st.columns([1.4, 1, 1.6])
+    with auto_col1:
+        auto_live = st.toggle(
+            "🔴 Auto-Live Streaming",
+            value=False,
+            help="Ingest a fresh micro-batch on every refresh interval so KPIs, charts, and the quarantine queue update continuously.",
+        )
+    with auto_col2:
+        auto_interval = st.select_slider(
+            "Refresh Interval:",
+            options=[0.5, 1.0, 2.0, 4.0],
+            value=1.0,
+            format_func=lambda s: f"{s:g}s",
+        )
+    with auto_col3:
+        st.write("")
+        if auto_live:
+            st.markdown(
+                '<span class="live-pill"><span class="live-dot"></span> Live auto-ingest active</span>',
+                unsafe_allow_html=True,
+            )
+
     # Candidate text pool for stream generation
     SAFE_CHATS = [
         "Love this stream! Keep up the great work ❤️",
@@ -925,57 +903,77 @@ with tab_stream:
         "Free crypto link claim: http://fake-coins.xyz/scam",
     ]
 
+    def ingest_one_batch() -> None:
+        """Generate, score, and record one simulated Kafka micro-batch."""
+        batch_payloads = []
+        for _ in range(stream_batch_size):
+            if random.random() < toxic_ratio_slider:
+                text_content = random.choice(TOXIC_CHATS)
+                img_cat = random.choice(["toxic_flame", "nsfw_flagged", "spam_promo"])
+            else:
+                text_content = random.choice(SAFE_CHATS)
+                img_cat = random.choice(["clean_nature", "default_avatar"])
+
+            batch_payloads.append(
+                MultimodalPayload(
+                    text_content=text_content,
+                    image_url=f"https://streamshield.ai/synth/{img_cat}",
+                )
+            )
+
+        # Score batch with the ONNX InferenceEngine
+        t0 = time.perf_counter()
+        results = asyncio.run(engine.run_batch(batch_payloads))
+        _elapsed_batch_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Append to session stream buffer
+        for pay, r in zip(batch_payloads, results):
+            item = {
+                "payload_id": r.payload_id[:8],
+                "text": pay.text_content,
+                "label": r.label,
+                "confidence": r.confidence,
+                "text_conf": r.text_confidence,
+                "image_conf": r.image_confidence,
+                "latency_ms": r.latency_ms,
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3],
+                "status": "Quarantined" if r.label == "Toxic" else "Cleared",
+            }
+            st.session_state.stream_buffer.insert(0, item)
+            st.session_state.audit_history.append(item)
+
+            if r.label == "Toxic":
+                st.session_state.quarantine_queue.insert(0, item)
+
+        # Cap buffers to prevent excessive memory
+        st.session_state.stream_buffer = st.session_state.stream_buffer[:200]
+        st.session_state.quarantine_queue = st.session_state.quarantine_queue[:50]
+        st.session_state.audit_history = st.session_state.audit_history[:500]
+
     if trigger_stream:
         with st.spinner(f"Consuming and scoring {num_burst_batches * stream_batch_size} streaming packets..."):
             for _ in range(num_burst_batches):
-                batch_payloads = []
-                for b_idx in range(stream_batch_size):
-                    is_toxic_sample = random.random() < toxic_ratio_slider
-                    if is_toxic_sample:
-                        text = random.choice(TOXIC_CHATS)
-                        img_cat = random.choice(["toxic_flame", "nsfw_flagged", "spam_promo"])
-                    else:
-                        text = random.choice(SAFE_CHATS)
-                        img_cat = random.choice(["clean_nature", "default_avatar"])
+                ingest_one_batch()
 
-                    batch_payloads.append(
-                        MultimodalPayload(
-                            text_content=text,
-                            image_url=f"https://streamshield.ai/synth/{img_cat}",
-                        )
-                    )
+    # Live Stream Metrics Cockpit — auto-refreshing fragment panel
+    @st.fragment(run_every=auto_interval if auto_live else None)
+    def live_stream_panel() -> None:
+        """Live KPIs, charts, quarantine queue, and packet ledger.
 
-                # Score batch with InferenceEngine
-                t0 = time.perf_counter()
-                results = asyncio.run(engine.run_batch(batch_payloads))
-                elapsed_batch_ms = (time.perf_counter() - t0) * 1000.0
+        With Auto-Live Streaming enabled, Streamlit re-runs this fragment on
+        every refresh interval: one micro-batch is ingested and every chart
+        redraws automatically without touching the rest of the page.
+        """
+        if auto_live:
+            ingest_one_batch()
 
-                # Append to session stream buffer
-                for p, r in zip(batch_payloads, results):
-                    item = {
-                        "payload_id": r.payload_id[:8],
-                        "text": p.text_content,
-                        "label": r.label,
-                        "confidence": r.confidence,
-                        "text_conf": r.text_confidence,
-                        "image_conf": r.image_confidence,
-                        "latency_ms": r.latency_ms,
-                        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3],
-                        "status": "Quarantined" if r.label == "Toxic" else "Cleared",
-                    }
-                    st.session_state.stream_buffer.insert(0, item)
-                    st.session_state.audit_history.append(item)
+        if not st.session_state.stream_buffer:
+            st.info(
+                "👆 Click **Inject Stream Traffic** above — or enable **🔴 Auto-Live Streaming** — "
+                "to simulate live Kafka multimodal micro-batches."
+            )
+            return
 
-                    if r.label == "Toxic":
-                        st.session_state.quarantine_queue.insert(0, item)
-
-            # Cap buffers to prevent excessive memory
-            st.session_state.stream_buffer = st.session_state.stream_buffer[:200]
-            st.session_state.quarantine_queue = st.session_state.quarantine_queue[:50]
-            st.session_state.audit_history = st.session_state.audit_history[:500]
-
-    # Live Stream Metrics Cockpit
-    if st.session_state.stream_buffer:
         df_stream = pd.DataFrame(st.session_state.stream_buffer)
 
         total_ingested = len(df_stream)
@@ -1059,7 +1057,7 @@ with tab_stream:
             )
             fig_stream_timeline.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
             fig_stream_timeline.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-            st.plotly_chart(fig_stream_timeline, use_container_width=True)
+            st.plotly_chart(fig_stream_timeline, width="stretch", config=PLOT_CFG)
 
         with stream_viz_col2:
             st.markdown("<h4 style='color: #f87171; margin-bottom: 8px;'>🚨 Live Quarantine Queue (Action Required)</h4>", unsafe_allow_html=True)
@@ -1090,8 +1088,8 @@ with tab_stream:
             use_container_width=True,
             hide_index=True,
         )
-    else:
-        st.info("👆 Click **'Inject Stream Traffic'** above to simulate live Kafka multimodal micro-batches.")
+
+    live_stream_panel()
 
 
 # ===========================================================================
@@ -1136,7 +1134,7 @@ with tab_analytics:
                 font=dict(color="#94a3b8"),
                 margin=dict(l=10, r=10, t=35, b=15),
             )
-            st.plotly_chart(fig_donut, use_container_width=True)
+            st.plotly_chart(fig_donut, width="stretch", config=PLOT_CFG)
 
         with an_col2:
             # Latency Distribution Histogram & Box Plot
@@ -1159,7 +1157,7 @@ with tab_analytics:
             )
             fig_hist.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
             fig_hist.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-            st.plotly_chart(fig_hist, use_container_width=True)
+            st.plotly_chart(fig_hist, width="stretch", config=PLOT_CFG)
 
         # Audit Table with Search & Filter
         st.markdown("<h4 style='color: #e2e8f0; margin-top: 16px;'>🔍 Audit Trail Ledger (PostgreSQL Sync)</h4>", unsafe_allow_html=True)
@@ -1252,9 +1250,30 @@ with tab_benchmark:
         df_bench = pd.DataFrame(benchmark_data)
         st.dataframe(df_bench, use_container_width=True, hide_index=True)
 
-        # Interactive Latency Comparison Chart
+        # Interactive Latency Comparison Chart — pick metrics & axis scale
         latency_metrics = ["Inference Latency (p50)", "Inference Latency (p90)", "Inference Latency (p99)", "End-to-End Glass-to-Alert (p99)"]
-        latency_df = df_bench[df_bench["Metric"].isin(latency_metrics)].melt(
+        sel_col1, sel_col2 = st.columns([2.4, 1])
+        with sel_col1:
+            selected_latency_metrics = st.multiselect(
+                "Latency Metrics to Compare:",
+                options=latency_metrics,
+                default=latency_metrics,
+                key="bench_latency_metric_multiselect",
+                help="Toggle series on/off — the chart and table update instantly.",
+            )
+        with sel_col2:
+            st.write("")
+            log_scale_latency = st.toggle(
+                "Log Y-Axis",
+                value=False,
+                key="bench_latency_log_toggle",
+                help="Logarithmic scale makes CPU-vs-TensorRT gaps easier to compare.",
+            )
+
+        if not selected_latency_metrics:
+            st.info("☑️ Select at least one latency metric above to render the comparison chart.")
+
+        latency_df = df_bench[df_bench["Metric"].isin(selected_latency_metrics)].melt(
             id_vars=["Metric"],
             var_name="Implementation",
             value_name="Latency (ms)"
@@ -1283,7 +1302,9 @@ with tab_benchmark:
         )
         fig_latency.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
         fig_latency.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_latency, use_container_width=True)
+        if log_scale_latency:
+            fig_latency.update_yaxes(type="log")
+        st.plotly_chart(fig_latency, width="stretch", config=PLOT_CFG)
 
         # Throughput Comparison
         throughput_df = df_bench[df_bench["Metric"] == "Throughput (FPS)"].melt(
@@ -1314,7 +1335,7 @@ with tab_benchmark:
         )
         fig_throughput.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
         fig_throughput.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_throughput, use_container_width=True)
+        st.plotly_chart(fig_throughput, width="stretch", config=PLOT_CFG)
 
         # Performance Radar Chart
         performance_categories = ["Latency (inv)", "Throughput", "VRAM Efficiency", "SLA Compliance"]
@@ -1351,7 +1372,7 @@ with tab_benchmark:
             font=dict(color="#94a3b8"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig_radar, use_container_width=True)
+        st.plotly_chart(fig_radar, width="stretch", config=PLOT_CFG)
 
     elif bench_section == "📈 Concurrency Scaling Analysis":
         st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>Concurrency Scaling: 1 to 100 Simultaneous Streams</h4>", unsafe_allow_html=True)
@@ -1388,7 +1409,7 @@ with tab_benchmark:
         )
         fig_latency_scale.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
         fig_latency_scale.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_latency_scale, use_container_width=True)
+        st.plotly_chart(fig_latency_scale, width="stretch", config=PLOT_CFG)
 
         # Throughput vs Concurrent Streams
         fig_throughput_scale = go.Figure()
@@ -1418,7 +1439,7 @@ with tab_benchmark:
         )
         fig_throughput_scale.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
         fig_throughput_scale.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_throughput_scale, use_container_width=True)
+        st.plotly_chart(fig_throughput_scale, width="stretch", config=PLOT_CFG)
 
         # GPU Utilization & VRAM Scaling
         fig_resource = make_subplots(
@@ -1452,7 +1473,7 @@ with tab_benchmark:
         )
         fig_resource.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
         fig_resource.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_resource, use_container_width=True)
+        st.plotly_chart(fig_resource, width="stretch", config=PLOT_CFG)
 
     elif bench_section == "💾 Memory Footprint Analysis":
         st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>GPU Memory VRAM Footprint Comparison</h4>", unsafe_allow_html=True)
@@ -1505,7 +1526,7 @@ with tab_benchmark:
         )
         fig_memory.update_xaxes(gridcolor="rgba(255,255,255,0.05)", tickangle=45)
         fig_memory.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_memory, use_container_width=True)
+        st.plotly_chart(fig_memory, width="stretch", config=PLOT_CFG)
 
         # Total Memory Comparison
         total_streamshield = df_memory["StreamShield (MB)"].sum()
@@ -1527,7 +1548,7 @@ with tab_benchmark:
             showlegend=True
         )
         fig_total_memory.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-        st.plotly_chart(fig_total_memory, use_container_width=True)
+        st.plotly_chart(fig_total_memory, width="stretch", config=PLOT_CFG)
 
     elif bench_section == "⚡ Live Stress Testing":
         st.markdown("<h4 style='color: #e2e8f0; margin: 16px 0 12px 0;'>Live ONNX Engine Stress Testing</h4>", unsafe_allow_html=True)
@@ -1649,7 +1670,7 @@ with tab_benchmark:
             )
             fig_bench.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
             fig_bench.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
-            st.plotly_chart(fig_bench, use_container_width=True)
+            st.plotly_chart(fig_bench, width="stretch", config=PLOT_CFG)
 
 
 # ===========================================================================

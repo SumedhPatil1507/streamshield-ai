@@ -55,7 +55,7 @@ By uniting **TensorRT FP16 execution graphs**, **asynchronous zero-copy GPU DMA 
 - 📡 **WebRTC & RTSP Live Stream Ingestion**: Full WebRTC SDP offer/answer peer connection handling (`/offer`) and PyAV low-latency H.264 RTSP camera demuxing (`/rtsp/connect`).
 - 🔔 **Real-Time WebSocket Moderation Alerts**: Instantaneous event-driven WebSocket broadcasting (`/ws/alerts`) to frontend subscriber dashboards with confidence scores and alert levels (`SAFE`, `WARNING`, `CRITICAL`).
 - 🛡️ **Multimodal Bayesian Decision Fusion**: Computes joint cross-modal risk scores with 128-dimensional $L_2$-normalized semantic embeddings.
-- 🖥️ **Interactive Streamlit Web Dashboard**: Real-time moderation studio, interactive Plotly risk gauges, live streaming simulator, quarantine action queue, and benchmark stress-tester.
+- 🖥️ **Interactive Streamlit Web Dashboard**: Auto-refreshing moderation studio, fully interactive Plotly charts (scroll-zoom, pan, hover, PNG export), live threshold re-scoring, an Auto-Live stream simulator with configurable refresh intervals, quarantine action queue, and an interactive benchmark stress-tester.
 - 📦 **Zero-Data-Loss Kafka Pipeline**: Manual offset management committing offsets to Kafka **only after** successful transactional writes to PostgreSQL audit logs.
 
 ---
@@ -72,11 +72,16 @@ cd streamshield-ai
 pip install -r requirements.txt
 ```
 
-### 2. Export & Optimize TensorRT ONNX Models
+> **Which requirements file?**
+> `requirements.txt` contains everything the Streamlit cockpit needs (Streamlit, Plotly, pandas, ONNX Runtime, transformers, Pillow, structlog, …).
+> For the full streaming backend (Kafka, PostgreSQL, WebRTC/FastAPI), additionally run `pip install -r requirements-full.txt`.
+
+### 2. Export & Optimize TensorRT ONNX Models *(optional)*
 
 ```bash
 python scripts/export_onnx_tensorrt.py --output-dir models/ --fp16 --build-trt-cache
 ```
+> Not required for a first run — if `models/*.onnx` are missing, `app.py` automatically generates valid ONNX stub graphs on startup (`scripts/export_onnx_stubs.py`).
 
 ### 3. Launch the Interactive Streamlit Cockpit
 
@@ -84,6 +89,8 @@ python scripts/export_onnx_tensorrt.py --output-dir models/ --fp16 --build-trt-c
 streamlit run app.py
 ```
 > Open your browser at `http://localhost:8501` to access the interactive moderation studio and live pipeline simulator.
+>
+> The cockpit boots in **offline mode** (`STREAMSHIELD_OFFLINE=1`): synthetic imagery replaces external HTTP fetches, so no API keys or network access are needed.
 
 ### 4. Launch the WebRTC & RTSP Ingestion Server
 
@@ -119,14 +126,23 @@ StreamShield AI includes a modern, dark-mode glassmorphic web cockpit built with
 ```
 
 ### Dashboard Features:
-1. **🛡️ Live Moderation Studio**: Interactive scoring with preset scenarios (Wholesome Gaming, Toxic Harassment, NSFW Media, Spam Scam, Sarcasm), Plotly risk radar gauges, and 128-D vector visualizations.
-2. **⚡ Stream Pipeline Simulator**: High-frequency streaming generator with real-time quarantine queues and moderator override actions (*Clear, Escalate, Flag*).
-3. **📊 Analytics & Audit Logs**: Historical compliance logs synced with PostgreSQL and 1-click CSV audit trail export.
+1. **🛡️ Live Moderation Studio**: Interactive scoring with preset scenarios (Wholesome Gaming, Toxic Harassment, NSFW Media, Spam Scam, Sarcasm), a Plotly risk gauge with modality breakdown, and a **128-d Embedding Spectrum Explorer** with a dimension-window slider. Decision-threshold sliders **re-score the verdict live** — move them and the verdict card updates instantly, without re-inference.
+2. **⚡ Stream Pipeline Simulator**: High-frequency streaming generator with an **🔴 Auto-Live Streaming** toggle (0.5 s–4 s refresh intervals) powered by `st.fragment` auto-reruns — KPI cards, the event scatter, packet ledger, and quarantine queue all redraw continuously — plus manual burst injection and moderator queue clearing.
+3. **📊 Analytics & Audit Logs**: Historical compliance records with verdict / confidence / text-search filters, latency distribution histograms with a 50 ms SLA marker, and 1-click CSV audit trail export.
 4. **🚀 Interactive Benchmarks**: Comprehensive performance analysis with interactive Plotly charts comparing CPU, CUDA, and TensorRT implementations:
-   - **Comparative Performance Matrix**: Latency, throughput, VRAM footprint, and SLA compliance comparisons
+   - **Comparative Performance Matrix**: Latency metric multi-select + log/linear axis toggle, throughput, VRAM footprint, and SLA compliance comparisons
    - **Concurrency Scaling Analysis**: 1 to 100 simultaneous streams with latency and throughput curves
    - **Memory Footprint Analysis**: Detailed VRAM breakdown by component
    - **Live Stress Testing**: Real-time ONNX engine benchmarking with percentile latency analysis
+5. **🏗️ Architecture & Model Specs**: Annotated system-architecture diagrams and model card tables.
+
+### Fully Interactive Plotly Charts
+Every chart in the cockpit is a native **Plotly** figure rendered with a shared configuration (`PLOT_CFG`):
+- **Scroll-zoom** with the mouse wheel, click-drag **pan**, and double-click to autoscale/reset
+- **Box & lasso selection** tools from the floating modebar
+- Rich **hover readouts** on every trace (unified crosshair on the embedding explorer)
+- **2× PNG export** of any chart straight from the modebar camera button
+- The modebar itself is themed to match the dark glassmorphism UI
 
 ---
 
