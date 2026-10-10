@@ -64,16 +64,19 @@ By uniting **TensorRT FP16 execution graphs**, **asynchronous zero-copy GPU DMA 
 
 ### 1. Clone & Install Dependencies
 
-```bash
+```powershell
 git clone https://github.com/SumedhPatil1507/streamshield-ai.git
 cd streamshield-ai
 
-# Install Python requirements
-pip install -r requirements.txt
+# Python 3.11 is recommended for local development.
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 > **Which requirements file?**
-> `requirements.txt` contains everything the Streamlit cockpit needs (Streamlit, Plotly, pandas, ONNX Runtime, transformers, Pillow, structlog, …).
+> `requirements.txt` contains the Streamlit cockpit dependencies (Streamlit, Plotly, pandas, ONNX Runtime, Pillow, structlog, …). The offline demo does not install PyTorch, Transformers, or Rust-built tokenizers.
 > For the full streaming backend (Kafka, PostgreSQL, WebRTC/FastAPI), additionally run `pip install -r requirements-full.txt`.
 
 ### 2. Export & Optimize TensorRT ONNX Models *(optional)*
@@ -85,12 +88,13 @@ python scripts/export_onnx_tensorrt.py --output-dir models/ --fp16 --build-trt-c
 
 ### 3. Launch the Interactive Streamlit Cockpit
 
-```bash
-streamlit run app.py
+```powershell
+python -m streamlit run app.py
 ```
 > Open your browser at `http://localhost:8501` to access the interactive moderation studio and live pipeline simulator.
 >
 > The cockpit boots in **offline mode** (`STREAMSHIELD_OFFLINE=1`): synthetic imagery replaces external HTTP fetches, so no API keys or network access are needed.
+> For Streamlit Community Cloud, choose Python 3.11 in **Advanced settings** when deploying. Cloud does not change an existing app's Python version in place; redeploy the app with the desired version if it was created on Python 3.14.
 
 ### 4. Launch the WebRTC & RTSP Ingestion Server
 

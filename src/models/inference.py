@@ -17,7 +17,9 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import os
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -277,13 +279,48 @@ _tokenizer: Optional[object] = None
 
 
 def _get_tokenizer():
-    """Return a cached ``AutoTokenizer`` instance."""
+    """Return a cached tokenizer, with a deterministic offline demo fallback.
+
+    The Streamlit cockpit defaults to offline mode. In that mode, do not make
+    first-use inference depend on downloading a Hugging Face tokenizer. Use a
+    stable demo tokenizer locally, while production mode loads the configured
+    Hugging Face tokenizer and surfaces genuine configuration errors.
+    """
     global _tokenizer
     if _tokenizer is None:
-        from transformers import AutoTokenizer  # deferred import for speed
+        offline = os.environ.get("STREAMSHIELD_OFFLINE", "").strip().lower() not in ("", "0", "false")
 
-        logger.info("loading_tokenizer", model_path=settings.TEXT_MODEL_PATH)
-        _tokenizer = AutoTokenizer.from_pretrained(settings.TEXT_MODEL_PATH)
+        class OfflineDemoTokenizer:
+            """Small stable tokenizer for the repository's local demo models."""
+
+            def __call__(self, texts, max_length, padding, truncation, return_tensors):
+                input_ids = np.zeros((len(texts), max_length), dtype=np.int64)
+                attention_mask = np.zeros_like(input_ids)
+                for row, text in enumerate(texts):
+                    pieces = str(text).lower().split()[: max_length - 2]
+                    ids = [101]
+                    ids.extend(
+                        1000 + int.from_bytes(
+                            hashlib.blake2s(piece.encode("utf-8"), digest_size=4).digest(), "little"
+                        ) % 29000
+                        for piece in pieces
+                    )
+                    ids.append(102)
+                    ids = ids[:max_length]
+                    input_ids[row, :len(ids)] = ids
+                    attention_mask[row, :len(ids)] = 1
+                return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+        if offline:
+            logger.info("offline_demo_tokenizer_enabled")
+            _tokenizer = OfflineDemoTokenizer()
+        else:
+            # Transformers is optional for the Streamlit demo. Import it only
+            # when production mode explicitly requests a real HF tokenizer.
+            from transformers import AutoTokenizer  # deferred import for speed
+
+            logger.info("loading_tokenizer", model_path=settings.TEXT_MODEL_PATH)
+            _tokenizer = AutoTokenizer.from_pretrained(settings.TEXT_MODEL_PATH)
     return _tokenizer
 
 
