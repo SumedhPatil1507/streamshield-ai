@@ -6,6 +6,7 @@ Interactive Streamlit Application powered by ONNX Runtime, Kafka Pipelines, and 
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import os
 import random
@@ -46,6 +47,8 @@ from src.models.inference import (
     preprocess_images_batch,
 )
 from src.models.model_utils import normalize_l2, sigmoid
+from src.moderation_report import build_moderation_report
+from src.upload_moderation import UploadModerationError, frame_to_chw01, moderate_media_file
 from src.streaming.config import settings
 from src.streaming.schemas import MultimodalPayload
 
@@ -468,9 +471,10 @@ st.markdown("<hr style='border: none; border-top: 1px solid rgba(255, 255, 255, 
 # ---------------------------------------------------------------------------
 # Main Tabs Navigation
 # ---------------------------------------------------------------------------
-tab_studio, tab_stream, tab_analytics, tab_benchmark, tab_arch = st.tabs([
+tab_studio, tab_stream, tab_upload, tab_analytics, tab_benchmark, tab_arch = st.tabs([
     "🛡️ Live Moderation Studio",
     "⚡ Stream Pipeline Simulator",
+    "📤 Upload Moderator",
     "📊 Analytics & Audit Logs",
     "🚀 Engine Benchmarks",
     "🏗️ Architecture & Model Specs",
@@ -701,6 +705,31 @@ with tab_studio:
             """,
             unsafe_allow_html=True,
         )
+
+    # Platform-standard explainable policy report (same JSON contract as
+    # GET /ws/alerts alerts and POST /moderate/upload responses).
+    with st.expander("📜 Automated Policy Report — standardized explainable JSON", expanded=False):
+        policy_report = build_moderation_report(
+            label=res["label"],
+            confidence=res["confidence"],
+            text_confidence=res["text_confidence"],
+            image_confidence=res["image_confidence"],
+            frame_ref=res.get("payload_id", "studio"),
+            source="live_stream",
+        )
+        steps_html = "".join(f"<li style='margin:2px 0;'>{step}</li>" for step in policy_report["next_steps"])
+        st.markdown(
+            f"""
+            <div class="glass-card">
+                <div style="font-weight:700; color:#f87171; font-size:1.02rem; margin-bottom:6px;">{policy_report["verdict"]}</div>
+                <div style="color:#cbd5e1; font-size:0.86rem; margin-bottom:4px;"><b style="color:#94a3b8;">🧠 Reasoning:</b> {policy_report["reasoning"]}</div>
+                <div style="color:#cbd5e1; font-size:0.86rem; margin-bottom:4px;"><b style="color:#94a3b8;">🎯 Recommendation:</b> {policy_report["recommendation"]}</div>
+                <div style="color:#cbd5e1; font-size:0.86rem;"><b style="color:#94a3b8;">🧭 Next Steps:</b><ol style="margin:4px 0 0 18px;">{steps_html}</ol></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.json(policy_report)
 
     # Interactive Plots Section: Gauge & Risk Breakdown + Vector Embeddings
     chart_col1, chart_col2 = st.columns([1.1, 0.9])
@@ -1093,7 +1122,239 @@ with tab_stream:
 
 
 # ===========================================================================
-# TAB 3: Analytics, Audit Logs & Vector Space Explorer
+# TAB 3: File Upload Moderator — frame-by-frame temporal risk timeline
+# ===========================================================================
+with tab_upload:
+    st.markdown(
+        """
+        <div class="hero-banner">
+            <h3 style="margin:0 0 6px 0; color: #f8fafc; font-size: 1.25rem;">📤 File Upload Moderation Engine</h3>
+            <p style="margin:0; color: #cbd5e1; font-size: 0.9rem;">
+                Upload a video (<code>.mp4</code> / <code>.mov</code>) or image (<code>.jpg</code> / <code>.png</code>) for
+                frame-by-frame multimodal inference with a temporal risk timeline and the platform-standard explainable policy report.
+                Decoded locally with PyAV — no external services.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    up_col1, up_col2 = st.columns([1.15, 0.85], gap="large")
+
+    with up_col1:
+        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>1. Media Payload</h4>", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Video or image file",
+            type=["mp4", "mov", "jpg", "jpeg", "png"],
+            key="upload_moderator_uploader",
+            help="Decoded locally with PyAV (H.264). Maximum upload size: 64 MB.",
+        )
+        if uploaded_file is not None:
+            st.caption(f"`{uploaded_file.name}` · {uploaded_file.size / 1024:.1f} KB · {uploaded_file.type}")
+            if uploaded_file.type and uploaded_file.type.startswith("image"):
+                st.image(uploaded_file, caption="Uploaded preview")
+        caption_input = st.text_input(
+            "Caption / ASR transcript (optional)",
+            value="",
+            key="upload_caption",
+            help="Scored alongside every sampled frame; leave blank to use synthetic frame captions.",
+        )
+
+    with up_col2:
+        st.markdown("<h4 style='margin-bottom: 8px; color: #e2e8f0;'>2. Scan Configuration</h4>", unsafe_allow_html=True)
+        up_sample_fps = st.slider("Video sampling rate (FPS):", 0.5, 5.0, 2.0, 0.5, key="upload_sample_fps")
+        up_max_frames = st.slider("Max frames analysed:", 8, 128, 32, 8, key="upload_max_frames")
+        st.caption("Batches of 16 frames are scored concurrently through parallel ONNX sessions.")
+        scan_clicked = st.button(
+            "🔍 Run Temporal Moderation Scan",
+            type="primary",
+            use_container_width=True,
+            key="upload_scan_btn",
+        )
+
+    async def _upload_infer_fn(texts, frames):
+        """Adapter: score (texts, HWC uint8 frames) with the app's ONNX engine.
+
+        Text tokenization and image preprocessing run first, then both ONNX
+        sessions execute concurrently via ``asyncio.gather`` in executor
+        threads (the pinned/CUDA DMA path is used for pixels when available).
+        """
+        t0 = time.perf_counter()
+        tokens = tokenize_batch(texts)
+        chw01 = np.stack([frame_to_chw01(f) for f in frames])
+        pixels = engine.image_buffer.normalize_batch(chw01)
+        loop = asyncio.get_running_loop()
+
+        def _run_text():
+            return engine._text_session.run(
+                None,
+                {"input_ids": tokens["input_ids"], "attention_mask": tokens["attention_mask"]},
+            )
+
+        def _run_image():
+            return engine._image_session.run(None, {"pixel_values": pixels})
+
+        text_out, image_out = await asyncio.gather(
+            loop.run_in_executor(None, _run_text),
+            loop.run_in_executor(None, _run_image),
+        )
+        scores = []
+        for i in range(len(texts)):
+            text_prob = float(sigmoid(text_out[0][i : i + 1])[0, 1])
+            image_prob = float(sigmoid(image_out[0][i : i + 1])[0, 1])
+            fused = max(text_prob, image_prob)
+            scores.append(
+                {
+                    "label": "Toxic" if fused >= 0.50 else "Non-Toxic",
+                    "confidence": fused,
+                    "text_confidence": text_prob,
+                    "image_confidence": image_prob,
+                }
+            )
+        return scores, (time.perf_counter() - t0) * 1000.0
+
+    if scan_clicked:
+        if uploaded_file is None:
+            st.warning("Upload a `.mp4`, `.mov`, `.jpg` or `.png` file first.")
+        else:
+            try:
+                with st.spinner("Decoding media and running batched multimodal inference..."):
+                    scan_result = asyncio.run(
+                        moderate_media_file(
+                            uploaded_file.name,
+                            uploaded_file.getvalue(),
+                            infer_fn=_upload_infer_fn,
+                            sample_fps=up_sample_fps,
+                            max_frames=up_max_frames,
+                            caption=caption_input,
+                            capture_thumbnail=True,
+                        )
+                    )
+                st.session_state.upload_scan_result = scan_result
+            except UploadModerationError as up_err:
+                st.error(f"Upload rejected (HTTP {up_err.status_code}): {up_err.detail}")
+            except Exception as up_err:  # surface unexpected failures in UI
+                st.exception(up_err)
+
+    scan_result = st.session_state.get("upload_scan_result")
+
+    if scan_result is None:
+        st.info(
+            "👆 Upload a clip or image above and press **Run Temporal Moderation Scan** "
+            "to generate the per-frame risk timeline and policy report."
+        )
+    else:
+        stats = scan_result["stats"]
+        report = scan_result["report"]
+        tl_df = pd.DataFrame(scan_result["timeline"])
+
+        # --- KPI row -------------------------------------------------------
+        k1, k2, k3, k4, k5 = st.columns(5)
+        kpi_specs = [
+            (k1, "FRAMES ANALYSED", f"{stats['frames_processed']}", f"{stats['batches']} batch(es) of ≤16", "#38bdf8"),
+            (k2, "PEAK FUSED RISK", f"{stats['peak_risk'] * 100:.1f}%", f"frame #{stats['peak_frame']}",
+             "#f87171" if stats["peak_risk"] >= 0.5 else "#34d399"),
+            (k3, "VIOLATIONS", f"{stats['violations']}", f"{stats['critical_frames']} critical", "#fbbf24"),
+            (k4, "BATCH p99", f"{stats['inference_p99_ms']:.1f} ms", f"p50 {stats['inference_p50_ms']:.1f} ms", "#a855f7"),
+            (k5, "PIPELINE TOTAL", f"{stats['total_pipeline_ms']:.0f} ms",
+             f"{stats.get('source_fps', 0):.0f} FPS source" if stats["media_kind"] == "video" else "single image", "#34d399"),
+        ]
+        for col, label, value, delta, color in kpi_specs:
+            with col:
+                st.markdown(
+                    f"""
+                    <div class="glass-card">
+                        <div class="metric-label">{label}</div>
+                        <div class="metric-value" style="color: {color};">{value}</div>
+                        <div class="metric-delta" style="color: #94a3b8;">{delta}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        # --- Standardized policy report + peak-risk frame -------------------
+        rep_col, thumb_col = st.columns([1.7, 0.8], gap="large")
+        with rep_col:
+            st.markdown("<h4 style='color: #e2e8f0;'>⚖️ Standardized Explainable Policy Report</h4>", unsafe_allow_html=True)
+            steps_html = "".join(f"<li style='margin:3px 0;'>{step}</li>" for step in report["next_steps"])
+            st.markdown(
+                f"""
+                <div class="glass-card">
+                    <div style="font-weight:700; color:#f87171; font-size:1.05rem; margin-bottom:8px;">{report["verdict"]}</div>
+                    <div style="color:#cbd5e1; font-size:0.87rem; margin-bottom:5px;"><b style="color:#94a3b8;">🧠 Reasoning:</b> {report["reasoning"]}</div>
+                    <div style="color:#cbd5e1; font-size:0.87rem; margin-bottom:5px;"><b style="color:#94a3b8;">🎯 Recommendation:</b> {report["recommendation"]}</div>
+                    <div style="color:#cbd5e1; font-size:0.87rem;"><b style="color:#94a3b8;">🧭 Next Steps:</b><ol style="margin:5px 0 0 18px;">{steps_html}</ol></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.expander("View raw standardized JSON payload"):
+                st.json(report)
+        with thumb_col:
+            st.markdown("<h4 style='color: #e2e8f0;'>🎯 Peak-Risk Frame</h4>", unsafe_allow_html=True)
+            if "peak_frame_jpeg_b64" in scan_result:
+                st.image(base64.b64decode(scan_result["peak_frame_jpeg_b64"]), caption=f"frame #{stats['peak_frame']}")
+            st.caption(
+                f"Mean risk {stats['mean_risk'] * 100:.1f}% · effective sampling "
+                f"{stats['effective_sample_fps']:.2f} FPS · `{scan_result['filename']}`"
+            )
+
+        # --- Interactive temporal risk timeline (Plotly) ---------------------
+        st.markdown("<h4 style='color: #e2e8f0; margin-top: 10px;'>📈 Temporal Risk Timeline</h4>", unsafe_allow_html=True)
+        fig_timeline = go.Figure()
+        fig_timeline.add_trace(
+            go.Scatter(
+                x=tl_df["frame"], y=tl_df["confidence"], name="Fused risk",
+                mode="lines+markers", line=dict(color="#38bdf8", width=2.5),
+                marker=dict(size=9, color=tl_df["confidence"], colorscale="RdYlGn_r",
+                            cmin=0.0, cmax=1.0, showscale=True, colorbar=dict(title="risk", thickness=10)),
+                hovertemplate="frame %{x}<br>fused %{y:.3f}<extra></extra>",
+            )
+        )
+        fig_timeline.add_trace(
+            go.Scatter(x=tl_df["frame"], y=tl_df["text_confidence"], name="Text/ASR modality",
+                       mode="lines", line=dict(color="#818cf8", width=1.5, dash="dot"),
+                       hovertemplate="text %{y:.3f}<extra></extra>")
+        )
+        fig_timeline.add_trace(
+            go.Scatter(x=tl_df["frame"], y=tl_df["image_confidence"], name="Vision modality",
+                       mode="lines", line=dict(color="#34d399", width=1.5, dash="dot"),
+                       hovertemplate="vision %{y:.3f}<extra></extra>")
+        )
+        fig_timeline.add_hline(y=0.50, line_dash="dashdot", line_color="#fbbf24",
+                               annotation_text="WARNING ≥ 50%", annotation_position="bottom right")
+        fig_timeline.add_hline(y=0.85, line_dash="dashdot", line_color="#f87171",
+                               annotation_text="CRITICAL ≥ 85%", annotation_position="top left")
+        fig_timeline.update_layout(
+            title=f"{scan_result['kind'].title()} moderation timeline — {stats['frames_processed']} frames",
+            height=400, margin=dict(l=20, r=20, t=55, b=20),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8"), hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
+            yaxis=dict(range=[0, 1.02], gridcolor="rgba(255,255,255,0.05)", title="Risk confidence"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Frame index"),
+        )
+        st.plotly_chart(fig_timeline, width="stretch", config=PLOT_CFG)
+
+        # --- Timeline table + export ---------------------------------------
+        tbl_col, meta_col = st.columns([1.5, 1])
+        with tbl_col:
+            st.markdown("<h5 style='color: #e2e8f0;'>🧾 Frame-Level Timeline</h5>", unsafe_allow_html=True)
+            st.dataframe(tl_df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Export timeline as CSV",
+                data=tl_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{scan_result['filename']}_risk_timeline.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with meta_col:
+            st.markdown("<h5 style='color: #e2e8f0;'>⚙️ Scan Statistics</h5>", unsafe_allow_html=True)
+            st.json(stats)
+
+
+# ===========================================================================
+# TAB 4: Analytics, Audit Logs & Vector Space Explorer
 # ===========================================================================
 with tab_analytics:
     st.markdown(
@@ -1193,7 +1454,7 @@ with tab_analytics:
 
 
 # ===========================================================================
-# TAB 4: Engine Benchmarks & Performance Analysis
+# TAB 5: Engine Benchmarks & Performance Analysis
 # ===========================================================================
 with tab_benchmark:
     st.markdown(
@@ -1674,7 +1935,7 @@ with tab_benchmark:
 
 
 # ===========================================================================
-# TAB 5: Architecture & Model Specs
+# TAB 6: Architecture & Model Specs
 # ===========================================================================
 with tab_arch:
     st.markdown(

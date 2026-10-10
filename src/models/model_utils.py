@@ -23,13 +23,25 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 _session_cache: Dict[str, ort.InferenceSession] = {}
 
+# Intra-op thread count for ONNX Runtime sessions.
+#
+# These moderation models are small (4-8M params, seq_len=128, 224x224 input),
+# so ORT's intra-op parallelism dominates runtime with thread-spawn/sync
+# overhead. Measured on a 12-core host with models/text_toxicity.onnx (batch 16):
+#   intra_op=12 -> p50 541ms | intra_op=4 -> 238ms | intra_op=1 -> 31ms
+# A single worker thread per session (with text/vision sessions running
+# concurrently in separate executor threads) is ~17x faster end-to-end.
+# Override with STREAMSHIELD_ORT_THREADS for larger models.
+_DEFAULT_INTRA_OP_THREADS = max(1, int(os.environ.get("STREAMSHIELD_ORT_THREADS", "1")))
+
 
 def get_onnx_session(model_path: str) -> ort.InferenceSession:
     """Load (or return cached) an ONNX ``InferenceSession`` for *model_path*.
 
-    Provider priority is ``CUDAExecutionProvider`` → ``CPUExecutionProvider``.
-    ``IntraOpNumThreads`` is set to ``os.cpu_count()`` and graph optimisation
-    is set to ``ORT_ENABLE_ALL`` for maximum throughput.
+    Provider priority is ``TensorrtExecutionProvider`` → ``CUDAExecutionProvider``
+    → ``CPUExecutionProvider`` (only providers present in this build are kept).
+    ``IntraOpNumThreads`` defaults to 1 (see ``_DEFAULT_INTRA_OP_THREADS``) and
+    graph optimisation is set to ``ORT_ENABLE_ALL`` for maximum throughput.
 
     Parameters
     ----------
@@ -44,7 +56,7 @@ def get_onnx_session(model_path: str) -> ort.InferenceSession:
     if model_path in _session_cache:
         return _session_cache[model_path]
 
-    desired_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    desired_providers = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
 
     # Filter to only providers that are actually available in this build.
     available = ort.get_available_providers()
@@ -53,7 +65,7 @@ def get_onnx_session(model_path: str) -> ort.InferenceSession:
         providers = ["CPUExecutionProvider"]
 
     session_opts = ort.SessionOptions()
-    session_opts.intra_op_num_threads = os.cpu_count() or 1
+    session_opts.intra_op_num_threads = _DEFAULT_INTRA_OP_THREADS
     session_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
     session = ort.InferenceSession(model_path, sess_options=session_opts, providers=providers)

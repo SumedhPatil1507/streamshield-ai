@@ -122,6 +122,26 @@ def tokenize_batch(texts: List[str]) -> dict:
     }
 
 
+def decode_image_to_chw01(raw: bytes) -> np.ndarray:
+    """Decode raw image bytes to a ``(3, 224, 224)`` float32 CHW array in ``[0, 1]``.
+
+    This is the *raw* (un-normalised) decode step so that normalisation can be
+    executed either on the CPU (NumPy) or on the GPU inside
+    :class:`PinnedImageBatchBuffer`'s dedicated CUDA stream.
+    """
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img = img.resize((224, 224), Image.BILINEAR)
+    arr = np.array(img, dtype=np.float32) / 255.0  # (224, 224, 3)
+    return arr.transpose(2, 0, 1)  # HWC → CHW
+
+
+def normalize_chw01_batch(batch: np.ndarray) -> np.ndarray:
+    """ImageNet-normalise a ``(N, 3, 224, 224)`` float32 array in ``[0, 1]`` (CPU)."""
+    mean = _IMAGENET_MEAN.reshape(1, 3, 1, 1)
+    std = _IMAGENET_STD.reshape(1, 3, 1, 1)
+    return ((batch - mean) / std).astype(np.float32)
+
+
 def preprocess_images_batch(image_bytes_list: List[bytes]) -> np.ndarray:
     """Decode and normalise a list of raw image bytes into a model-ready tensor.
 
@@ -136,15 +156,117 @@ def preprocess_images_batch(image_bytes_list: List[bytes]) -> np.ndarray:
         Float32 array of shape ``(N, 3, 224, 224)`` normalised with ImageNet
         statistics (channels-first).
     """
-    arrays: List[np.ndarray] = []
-    for raw in image_bytes_list:
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
-        img = img.resize((224, 224), Image.BILINEAR)
-        arr = np.array(img, dtype=np.float32) / 255.0  # (224, 224, 3)
-        arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD  # normalise
-        arr = arr.transpose(2, 0, 1)  # HWC → CHW
-        arrays.append(arr)
-    return np.stack(arrays, axis=0)  # (N, 3, 224, 224)
+    decoded = np.stack([decode_image_to_chw01(raw) for raw in image_bytes_list], axis=0)
+    return normalize_chw01_batch(decoded)
+
+
+# ---------------------------------------------------------------------------
+# Pinned (page-locked) host memory staging + asynchronous DMA CUDA streams
+# ---------------------------------------------------------------------------
+
+
+class PinnedImageBatchBuffer:
+    """Pre-allocated page-locked host buffer and dedicated CUDA stream.
+
+    HPC rationale
+    -------------
+    * ``torch.empty(..., pin_memory=True)`` allocates **page-locked** host RAM.
+      Only pinned pages can be targeted by the GPU NIC's direct memory access
+      (DMA); pageable memory must first be staged through a driver-internal
+      pinned bounce buffer, serialising the copy.
+    * ``torch.cuda.Stream()`` gives this buffer a **dedicated copy/compute
+      stream**. The host→device transfer is issued with ``non_blocking=True``
+      (legal only for pinned sources) so it overlaps with kernels already in
+      flight instead of serialising on the default stream.
+    * Normalisation (ImageNet mean/std) is fused into the same stream so the
+      transfer and the scale/shift execute back-to-back before the single
+      ``stream.synchronize()`` at the ONNX session boundary.
+
+    On CPU-only builds (no CUDA accelerator) ``torch`` is imported lazily and
+    the class transparently degrades to a NumPy normalisation path with the
+    same numeric output — no CUDA imports, no pinning attempts.
+    """
+
+    def __init__(self, max_batch_size: int = 64, height: int = 224, width: int = 224) -> None:
+        self.max_batch_size = max_batch_size
+        self.height = height
+        self.width = width
+        self.cuda_available = False
+        self.stream = None
+        self.host_buffer = None
+        self.device_buffer = None
+        self._torch = None
+
+        try:
+            import torch  # lazy: keeps CPU-only startup fast
+
+            self._torch = torch
+            if torch.cuda.is_available():
+                self.cuda_available = True
+                # Dedicated CUDA stream for non-blocking H2D DMA transfers.
+                self.stream = torch.cuda.Stream()
+                # Page-locked (pinned) host staging buffer.
+                self.host_buffer = torch.empty(
+                    (max_batch_size, 3, height, width),
+                    dtype=torch.float32,
+                    pin_memory=True,
+                )
+                # Pre-allocated destination in device VRAM (reused every batch).
+                self.device_buffer = torch.empty(
+                    (max_batch_size, 3, height, width),
+                    dtype=torch.float32,
+                    device="cuda",
+                )
+                self._mean = torch.tensor(_IMAGENET_MEAN, dtype=torch.float32, device="cuda").view(1, 3, 1, 1)
+                self._std = torch.tensor(_IMAGENET_STD, dtype=torch.float32, device="cuda").view(1, 3, 1, 1)
+        except Exception:  # pragma: no cover - torch missing / driver error
+            self.cuda_available = False
+
+        logger.info(
+            "pinned_image_buffer_ready",
+            cuda_available=self.cuda_available,
+            max_batch_size=max_batch_size,
+            mode="cuda_pinned_dma" if self.cuda_available else "cpu_numpy_fallback",
+        )
+
+    @property
+    def pinned_memory_used(self) -> bool:
+        """``True`` when page-locked host memory + async DMA is active."""
+        return self.cuda_available
+
+    def normalize_batch(self, chw01_batch: np.ndarray) -> np.ndarray:
+        """ImageNet-normalise ``(N, 3, 224, 224)`` float32 data in ``[0, 1]``.
+
+        GPU path: pageable→pinned copy, **non-blocking pinned→VRAM DMA** on the
+        dedicated stream, fused normalisation kernel, single stream sync.
+        CPU path: vectorised NumPy normalisation (identical numerics).
+        """
+        if chw01_batch.ndim != 4 or chw01_batch.shape[1:] != (3, self.height, self.width):
+            raise ValueError(f"Expected (N, 3, {self.height}, {self.width}) batch, got {chw01_batch.shape}")
+        n = chw01_batch.shape[0]
+        if n > self.max_batch_size:
+            raise ValueError(f"Batch size {n} exceeds pinned buffer capacity {self.max_batch_size}")
+
+        if not self.cuda_available:
+            return normalize_chw01_batch(chw01_batch)
+
+        torch = self._torch
+        with torch.cuda.stream(self.stream):
+            # 1. Pageable host RAM → page-locked staging buffer.
+            self.host_buffer[:n].copy_(torch.from_numpy(np.ascontiguousarray(chw01_batch)))
+            # 2. Pinned staging → VRAM via non-blocking DMA (overlaps compute).
+            self.device_buffer[:n].copy_(self.host_buffer[:n], non_blocking=True)
+            # 3. Fused normalisation on the same dedicated stream.
+            normalized = (self.device_buffer[:n] - self._mean) / self._std
+        # 4. Single synchronisation point before handing tensors to ONNX.
+        self.stream.synchronize()
+        return normalized.cpu().numpy()
+
+    def pin_host_tensor(self, tensor):
+        """Return a page-locked copy of *tensor* (CUDA builds) or the tensor as-is."""
+        if self.cuda_available:
+            return tensor.pin_memory()
+        return tensor
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +313,13 @@ class InferenceEngine:
         # Eagerly load sessions so we fail fast on missing/corrupt models.
         self._text_session = get_onnx_session(text_model_path)
         self._image_session = get_onnx_session(image_model_path)
+        # Page-locked staging buffer + dedicated CUDA stream for image batches.
+        self.image_buffer = PinnedImageBatchBuffer()
         logger.info(
             "inference_engine_ready",
             text_model=text_model_path,
             image_model=image_model_path,
+            pinned_dma=self.image_buffer.pinned_memory_used,
         )
 
     # ------------------------------------------------------------------
@@ -327,17 +452,29 @@ class InferenceEngine:
         fetch_tasks = [_safe_fetch(url) for url in image_urls]
         image_bytes_list: List[Optional[bytes]] = await asyncio.gather(*fetch_tasks)
 
-        # Build pixel tensor, tracking which items failed.
-        processed: List[np.ndarray] = []
+        # Decode successful fetches to raw CHW[0,1]; track failures separately
+        # (failed rows keep the legacy "all-zero = neutral embedding" semantics
+        # and are *not* ImageNet-normalised).
+        decoded: List[Optional[np.ndarray]] = []
         fetch_failures: List[bool] = []
         for raw in image_bytes_list:
             if raw is None:
-                processed.append(np.zeros((3, 224, 224), dtype=np.float32))
+                decoded.append(None)
                 fetch_failures.append(True)
             else:
-                processed.append(preprocess_images_batch([raw])[0])
+                decoded.append(decode_image_to_chw01(raw))
                 fetch_failures.append(False)
-        pixel_values = np.stack(processed, axis=0).astype(np.float32)
+
+        pixel_values = np.zeros((len(decoded), 3, 224, 224), dtype=np.float32)
+        good_rows = [d for d in decoded if d is not None]
+        if good_rows:
+            # Pinned host buffer → non-blocking DMA → normalised batch (see
+            # PinnedImageBatchBuffer); falls back to NumPy on CPU-only builds.
+            normalized_good = self.image_buffer.normalize_batch(np.stack(good_rows, axis=0))
+            row_iter = iter(normalized_good)
+            for i, d in enumerate(decoded):
+                if d is not None:
+                    pixel_values[i] = next(row_iter)
 
         session = self._image_session
 

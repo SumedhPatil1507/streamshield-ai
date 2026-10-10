@@ -4,6 +4,9 @@ pandas>=2.2.0
 onnxruntime>=1.18.0
 onnx>=1.16.0
 transformers>=4.41.0
+# tokenizers must stay inside transformers 4.45.x's declared range (<0.21);
+# 0.21+ conflicts with the pinned transformers and breaks its import.
+tokenizers>=0.20,<0.21
 Pillow>=10.3.0
 numpy>=1.26.0
 pydantic>=2.7.4

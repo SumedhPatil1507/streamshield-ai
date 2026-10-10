@@ -42,7 +42,7 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,13 @@ from src.inference_engine import (
     EngineInferenceResult,
     UltraLowLatencyInferenceEngine,
     get_inference_engine,
+)
+from src.moderation_report import build_moderation_report, classify_alert_level
+from src.upload_moderation import (
+    DEFAULT_MAX_FRAMES,
+    DEFAULT_SAMPLE_FPS,
+    UploadModerationError,
+    moderate_media_file,
 )
 
 # Configure logging
@@ -125,7 +132,13 @@ class StreamStatus(BaseModel):
 
 
 class ModerationAlertPayload(BaseModel):
-    """Real-time moderation alert broadcast over WebSocket."""
+    """Real-time moderation alert broadcast over WebSocket.
+
+    Carries the legacy telemetry fields plus the platform-standard explainable
+    report (``verdict`` / ``reasoning`` / ``recommendation`` / ``next_steps``)
+    so every consumer of ``GET /ws/alerts`` receives the same policy payload
+    as ``POST /moderate/upload`` and the Streamlit cockpit.
+    """
     alert_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     stream_id: str
     frame_id: int
@@ -137,6 +150,11 @@ class ModerationAlertPayload(BaseModel):
     latency_ms: float
     alert_level: str  # "SAFE", "WARNING", "CRITICAL"
     flagged: bool
+    # Standardized explainable moderation report
+    verdict: str = ""
+    reasoning: str = ""
+    recommendation: str = ""
+    next_steps: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -317,12 +335,21 @@ class VideoFrameIngestionQueue:
 
         for frame_item, result in zip(batch, results):
             flagged = result.confidence >= 0.50
-            if result.confidence >= 0.85:
-                level = "CRITICAL"
-            elif result.confidence >= 0.50:
-                level = "WARNING"
-            else:
-                level = "SAFE"
+            level = classify_alert_level(result.confidence)
+            source = "rtsp" if frame_item.stream_id.startswith("rtsp") else "webrtc"
+
+            # Standardized explainable moderation report (shared with
+            # POST /moderate/upload and the Streamlit cockpit).
+            report = build_moderation_report(
+                label=result.label,
+                confidence=result.confidence,
+                text_confidence=result.text_confidence,
+                image_confidence=result.image_confidence,
+                alert_level=level,
+                stream_id=frame_item.stream_id,
+                frame_ref=str(frame_item.frame_id),
+                source=source,
+            )
 
             alert = ModerationAlertPayload(
                 stream_id=frame_item.stream_id,
@@ -334,6 +361,10 @@ class VideoFrameIngestionQueue:
                 latency_ms=batch_latency,
                 alert_level=level,
                 flagged=flagged,
+                verdict=report["verdict"],
+                reasoning=report["reasoning"],
+                recommendation=report["recommendation"],
+                next_steps=report["next_steps"],
             )
 
             # Broadcast alert to frontend subscribers
@@ -657,6 +688,64 @@ async def rtsp_disconnect(stream_id: str):
     if not stopped:
         raise HTTPException(status_code=404, detail=f"RTSP stream {stream_id} not found or inactive")
     return {"status": "disconnected", "stream_id": stream_id}
+
+
+@app.post("/moderate/upload", summary="Moderate Uploaded Video/Image File")
+async def moderate_upload(
+    file: UploadFile = File(..., description="Video (.mp4/.mov) or image (.jpg/.jpeg/.png)"),
+    sample_fps: float = Form(DEFAULT_SAMPLE_FPS, description="Frames-per-second sampling rate for videos"),
+    max_frames: int = Form(DEFAULT_MAX_FRAMES, description="Hard cap on frames analysed per upload"),
+    caption: str = Form("", description="Optional caption/ASR transcript scored with every frame"),
+):
+    """Frame-by-frame file moderation returning a temporal risk timeline.
+
+    Decodes the upload with PyAV (H.264/MP4; OpenCV used for resize when
+    present), runs batched multimodal inference over sampled frames, and
+    responds with:
+
+    * ``timeline`` — per-frame temporal risk series (confidence, per-modality
+      scores, alert level) for interactive charting
+    * ``report`` — the platform-standard explainable moderation JSON
+      (``verdict`` / ``reasoning`` / ``recommendation`` / ``next_steps``)
+    * ``stats`` — latency percentiles (p50/p99), FPS, peak/mean risk
+    """
+    data = await file.read()
+    engine = frame_queue.inference_engine
+    upload_id = uuid.uuid4().hex[:8]
+
+    async def infer_fn(texts, frames):
+        t0 = time.perf_counter()
+        payload_ids = [f"upload_{upload_id}:{i}" for i in range(len(texts))]
+        results = await engine.infer_batch(texts=texts, images=frames, payload_ids=payload_ids)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        scores = [
+            {
+                "label": r.label,
+                "confidence": r.confidence,
+                "text_confidence": r.text_confidence,
+                "image_confidence": r.image_confidence,
+            }
+            for r in results
+        ]
+        return scores, latency_ms
+
+    try:
+        return await moderate_media_file(
+            file.filename or "upload.bin",
+            data,
+            infer_fn=infer_fn,
+            sample_fps=max(0.1, min(sample_fps, 30.0)),
+            max_frames=max(1, min(max_frames, 256)),
+            caption=caption,
+            capture_thumbnail=True,
+        )
+    except UploadModerationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Upload moderation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Moderation pipeline error: {exc}")
 
 
 @app.get("/streams", response_model=List[StreamStatus], summary="List Active Media Streams")

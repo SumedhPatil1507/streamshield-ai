@@ -274,14 +274,19 @@ class UltraLowLatencyInferenceEngine:
             provider_options.append(cuda_opts)
 
         # 3. CPU Execution Provider Fallback
+        # NOTE: intra-op threads default to 1 — these moderation models are small
+        # (4-8M params) and ORT's intra-op parallelism on many-core hosts thrashes
+        # (measured 17x slower at bs=16 with intra_op=cpu_count). Override with
+        # STREAMSHIELD_ORT_THREADS for larger models.
+        intra_op_threads = max(1, int(os.environ.get("STREAMSHIELD_ORT_THREADS", "1")))
         cpu_opts = {
-            "intra_op_num_threads": os.cpu_count() or 4,
+            "intra_op_num_threads": intra_op_threads,
         }
         providers.append("CPUExecutionProvider")
         provider_options.append(cpu_opts)
 
         sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = os.cpu_count() or 4
+        sess_opts.intra_op_num_threads = intra_op_threads
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
