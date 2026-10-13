@@ -2,9 +2,7 @@
 
 Also verifies the platform's latency SLA tiers for batch sizes 1..16:
 
-* **Accelerated providers** (TensorRT / CUDA EP): end-to-end wall-clock p99
-  must stay **under 20 ms** — the production SLA verified on A100 hardware
-  (18.4 ms p99 glass-to-alert, see docs/PERFORMANCE_WHITEPAPER.md).
+* **Accelerated providers** (TensorRT / CUDA EP): end-to-end wall-clock p99 is checked against a 20 ms local regression budget. This is not an A100 benchmark or a glass-to-alert measurement; see docs/PERFORMANCE_WHITEPAPER.md.
 * **CPU-only fallback hosts**: the engine is asserted against a documented
   CPU-tier budget so preprocessing/model regressions are still caught; the
   strict <20 ms orchestration-overhead SLA is asserted unconditionally in
@@ -39,6 +37,7 @@ from src.models.inference import (
     preprocess_images_batch,
 )
 from src.streaming.schemas import MultimodalPayload
+from src.moderation_report import REPORT_FIELDS, build_moderation_report
 
 # ---------------------------------------------------------------------------
 # SLA tier constants
@@ -49,6 +48,35 @@ SLA_BATCH_SIZES = (1, 4, 8, 16)
 # 12-core shared host). These are NOT the production SLA — they are regression
 # tripwires for the CPU path.
 CPU_TIER_P99_BUDGET_MS = {1: 1500.0, 4: 2500.0, 8: 3500.0, 16: 4500.0}
+
+
+class TestModerationReportSchema(unittest.TestCase):
+    """The cross-modal report must keep its stable four-field JSON contract."""
+
+    def test_critical_report_has_exact_schema_and_actionable_steps(self):
+        report = build_moderation_report(
+            label="Toxic",
+            confidence=0.942,
+            text_confidence=0.918,
+            image_confidence=0.942,
+            source="webrtc",
+            stream_id="schema-test",
+            frame_ref="17",
+        )
+        self.assertEqual(tuple(report), REPORT_FIELDS)
+        self.assertEqual(
+            set(report), {"verdict", "reasoning", "recommendation", "next_steps"}
+        )
+        self.assertEqual(report["verdict"], "CRITICAL TOXICITY VIOLATION")
+        self.assertIn("Vision: 94.2%", report["reasoning"])
+        self.assertIn("Text/Audio: 91.8%", report["reasoning"])
+        self.assertEqual(len(report["next_steps"]), 3)
+        self.assertTrue(
+            all(
+                step.startswith(f"Step {i}:")
+                for i, step in enumerate(report["next_steps"], 1)
+            )
+        )
 
 
 def _percentile(values, q: float) -> float:
@@ -151,10 +179,8 @@ class TestPinnedHostMemoryPreprocessor(unittest.TestCase):
 class TestP99LatencySLA(unittest.IsolatedAsyncioTestCase):
     """Verify the <20 ms p99 SLA for batch sizes 1..16 (tiered by provider).
 
-    * ``TensorrtExecutionProvider`` / ``CUDAExecutionProvider`` hosts: full
-      end-to-end wall clock must stay **under 20 ms p99** — the production SLA
-      verified on A100 hardware (18.4 ms glass-to-alert).
-    * ``CPUExecutionProvider`` fallback hosts: asserted against a documented
+    * ``TensorrtExecutionProvider`` / ``CUDAExecutionProvider`` hosts: the test applies a local p99 regression threshold; it is not an A100 glass-to-alert benchmark.
+    * `CPUExecutionProvider` fallback hosts: asserted against a documented
       CPU-tier budget so model/preprocessing regressions are still caught
       without GPU hardware. The strict <20 ms orchestration-overhead SLA is
       asserted unconditionally in tests/test_webrtc_server.py.

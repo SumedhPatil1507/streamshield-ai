@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ except Exception:
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.inference_engine import (
     EngineInferenceResult,
@@ -55,6 +56,7 @@ from src.moderation_report import build_moderation_report, classify_alert_level
 from src.upload_moderation import (
     DEFAULT_MAX_FRAMES,
     DEFAULT_SAMPLE_FPS,
+    MAX_UPLOAD_BYTES,
     UploadModerationError,
     moderate_media_file,
 )
@@ -131,6 +133,17 @@ class StreamStatus(BaseModel):
     started_at: str
 
 
+class ExplainableModerationReport(BaseModel):
+    """The canonical policy report, with exactly the shared four fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: str
+    reasoning: str
+    recommendation: str
+    next_steps: List[str]
+
+
 class ModerationAlertPayload(BaseModel):
     """Real-time moderation alert broadcast over WebSocket.
 
@@ -150,6 +163,9 @@ class ModerationAlertPayload(BaseModel):
     latency_ms: float
     alert_level: str  # "SAFE", "WARNING", "CRITICAL"
     flagged: bool
+    # Canonical four-field report shared with upload moderation. Alert
+    # transport metadata remains at the event level.
+    report: ExplainableModerationReport
     # Standardized explainable moderation report
     verdict: str = ""
     reasoning: str = ""
@@ -180,23 +196,27 @@ class WebSocketAlertManager:
         logger.info("WebSocket subscriber disconnected. Total active: %d", len(self.active_connections))
 
     async def broadcast_alert(self, alert: ModerationAlertPayload) -> None:
-        """Broadcast alert to all active connected clients."""
-        if not self.active_connections:
+        """Serialize once and fan out concurrently to active alert clients."""
+        payload_json = alert.model_dump_json()
+        async with self._lock:
+            connections = tuple(self.active_connections)
+        if not connections:
             return
 
-        payload_json = alert.model_dump_json()
-        dead_connections: List[WebSocket] = []
-
-        async with self._lock:
-            for connection in list(self.active_connections):
-                try:
-                    await connection.send_text(payload_json)
-                except Exception as err:
-                    logger.debug("Failed to send alert to websocket: %s", err)
-                    dead_connections.append(connection)
-
-            for dead in dead_connections:
-                self.active_connections.discard(dead)
+        results = await asyncio.gather(
+            *(connection.send_text(payload_json) for connection in connections),
+            return_exceptions=True,
+        )
+        dead_connections = [
+            connection
+            for connection, result in zip(connections, results)
+            if isinstance(result, BaseException)
+        ]
+        if dead_connections:
+            async with self._lock:
+                for connection in dead_connections:
+                    self.active_connections.discard(connection)
+            logger.debug("Removed %d disconnected alert websocket(s)", len(dead_connections))
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +381,7 @@ class VideoFrameIngestionQueue:
                 latency_ms=batch_latency,
                 alert_level=level,
                 flagged=flagged,
+                report=ExplainableModerationReport(**report),
                 verdict=report["verdict"],
                 reasoning=report["reasoning"],
                 recommendation=report["recommendation"],
@@ -384,6 +405,9 @@ class StreamIngestionManager:
         self.frame_queue = frame_queue
         self.active_peer_connections: Dict[str, Any] = {}
         self.active_rtsp_tasks: Dict[str, asyncio.Task] = {}
+        # PyAV demux/decode is synchronous. Keep one stop signal per stream so
+        # its native FFmpeg loop can be stopped without blocking the event loop.
+        self._rtsp_stop_events: Dict[str, threading.Event] = {}
         self.stream_metrics: Dict[str, Dict[str, Any]] = {}
 
     def get_or_create_metrics(self, stream_id: str, stream_type: str) -> Dict[str, Any]:
@@ -480,63 +504,111 @@ class StreamIngestionManager:
         metrics = self.get_or_create_metrics(stream_id, "rtsp")
 
         if stream_id in self.active_rtsp_tasks:
-            self.active_rtsp_tasks[stream_id].cancel()
+            await self.stop_rtsp_stream(stream_id)
+
+        stop_event = threading.Event()
+        self._rtsp_stop_events[stream_id] = stop_event
 
         task = asyncio.create_task(
-            self._rtsp_stream_loop(rtsp_url, stream_id, fps_sample_rate),
+            self._rtsp_stream_loop(rtsp_url, stream_id, fps_sample_rate, stop_event),
             name=f"RTSP-Ingest-{stream_id}",
         )
         self.active_rtsp_tasks[stream_id] = task
         logger.info("[%s] RTSP stream worker launched: %s (sample_rate=%.1f FPS)", stream_id, rtsp_url, fps_sample_rate)
         return stream_id
 
-    async def _rtsp_stream_loop(self, rtsp_url: str, stream_id: str, fps_sample_rate: float) -> None:
-        """Continuously decodes RTSP frames and pushes them to ingestion queue."""
-        frame_idx = 0
-        interval = 1.0 / max(fps_sample_rate, 1.0)
+    def _decode_rtsp_worker(
+        self,
+        rtsp_url: str,
+        stream_id: str,
+        fps_sample_rate: float,
+        stop_event: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Demux/decode with PyAV's native FFmpeg bindings off the asyncio loop.
+
+        FFmpeg performs H.264 demuxing and decode in native code (which releases
+        the GIL around codec work). Frame conversion is also kept in this worker
+        so a slow camera cannot stall WebRTC signaling or alert delivery.
+        """
+        interval = 1.0 / max(float(fps_sample_rate), 1.0)
         metrics = self.get_or_create_metrics(stream_id, "rtsp")
+        frame_idx = 0
+        container = None
+        try:
+            container = av.open(
+                rtsp_url,
+                timeout=(5.0, 1.0),
+                options={
+                    "rtsp_transport": "tcp",
+                    "fflags": "nobuffer",
+                    "flags": "low_delay",
+                    "max_delay": "500000",
+                },
+            )
+            video_stream = next(s for s in container.streams if s.type == "video")
+            video_stream.thread_type = "AUTO"
+            last_sample = 0.0
+            for packet in container.demux(video_stream):
+                if stop_event.is_set():
+                    break
+                for frame in packet.decode():
+                    if stop_event.is_set():
+                        break
+                    now = time.monotonic()
+                    if now - last_sample < interval:
+                        continue
+                    last_sample = now
+                    frame_idx += 1
+                    img_array = frame.to_ndarray(format="rgb24")
+                    queued = QueuedFrame(
+                        stream_id=stream_id,
+                        frame_id=frame_idx,
+                        timestamp=time.time(),
+                        image_data=img_array,
+                    )
+                    # Queue mutation belongs to the event-loop thread.
+                    loop.call_soon_threadsafe(self.frame_queue.enqueue_frame_nowait, queued)
+                    metrics["frames_received"] = frame_idx
+                    metrics["frames_processed"] = frame_idx
+            return True
+        except Exception as exc:
+            if not stop_event.is_set():
+                logger.warning("[%s] PyAV RTSP reader encountered error (%s).", stream_id, exc)
+            return False
+        finally:
+            if container is not None:
+                try:
+                    container.close()
+                except Exception:
+                    logger.debug("[%s] Error closing PyAV container", stream_id, exc_info=True)
 
+    async def _rtsp_stream_loop(
+        self,
+        rtsp_url: str,
+        stream_id: str,
+        fps_sample_rate: float,
+        stop_event: threading.Event,
+    ) -> None:
+        """Run native PyAV decode in an executor so asyncio remains responsive."""
         if AV_AVAILABLE and av is not None:
+            loop = asyncio.get_running_loop()
             try:
-                # Open RTSP container with low-latency options
-                container = av.open(
+                decoded = await loop.run_in_executor(
+                    None,
+                    self._decode_rtsp_worker,
                     rtsp_url,
-                    options={
-                        "rtsp_transport": "tcp",
-                        "fflags": "nobuffer",
-                        "max_delay": "500000",
-                    },
+                    stream_id,
+                    fps_sample_rate,
+                    stop_event,
+                    loop,
                 )
-                video_stream = next(s for s in container.streams if s.type == "video")
-                video_stream.thread_type = "AUTO"
-
-                last_sample = time.time()
-                for packet in container.demux(video_stream):
-                    for frame in packet.decode():
-                        now = time.time()
-                        if now - last_sample >= interval:
-                            frame_idx += 1
-                            last_sample = now
-                            metrics["frames_received"] = frame_idx
-
-                            img_array = frame.to_ndarray(format="rgb24")
-                            queued = QueuedFrame(
-                                stream_id=stream_id,
-                                frame_id=frame_idx,
-                                timestamp=now,
-                                image_data=img_array,
-                            )
-                            self.frame_queue.enqueue_frame_nowait(queued)
-                            metrics["frames_processed"] = frame_idx
-                    await asyncio.sleep(0.001)
-
+                if not decoded and not stop_event.is_set():
+                    await self._synthetic_frame_generator(stream_id, fps=fps_sample_rate)
             except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.warning("[%s] PyAV RTSP reader encountered error (%s). Using fallback generator.", stream_id, exc)
-                await self._synthetic_frame_generator(stream_id, fps=fps_sample_rate)
+                stop_event.set()
+                raise
         else:
-            # Fallback synthetic generator for testing/offline environments
             await self._synthetic_frame_generator(stream_id, fps=fps_sample_rate)
 
     async def _synthetic_frame_generator(self, stream_id: str, fps: float = 10.0) -> None:
@@ -579,6 +651,9 @@ class StreamIngestionManager:
     async def stop_rtsp_stream(self, stream_id: str) -> bool:
         """Stop active RTSP background ingest task."""
         if stream_id in self.active_rtsp_tasks:
+            stop_event = self._rtsp_stop_events.pop(stream_id, None)
+            if stop_event is not None:
+                stop_event.set()
             task = self.active_rtsp_tasks.pop(stream_id)
             task.cancel()
             try:
@@ -709,7 +784,14 @@ async def moderate_upload(
       (``verdict`` / ``reasoning`` / ``recommendation`` / ``next_steps``)
     * ``stats`` — latency percentiles (p50/p99), FPS, peak/mean risk
     """
-    data = await file.read()
+    # Bound memory use before materializing the upload. The helper validates
+    # this too, but only after receiving bytes.
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+        )
     engine = frame_queue.inference_engine
     upload_id = uuid.uuid4().hex[:8]
 

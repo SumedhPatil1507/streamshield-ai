@@ -127,7 +127,10 @@ def decode_video_frames(
             if idx % stride != 0:
                 continue
             frames.append(frame.to_ndarray(format="rgb24"))
-            timestamps.append(round(idx / src_fps, 4))
+            if frame.pts is not None and frame.time_base is not None:
+                timestamps.append(round(float(frame.pts * frame.time_base), 4))
+            else:
+                timestamps.append(round(idx / src_fps, 4))
             if len(frames) >= max_frames:
                 break
     finally:

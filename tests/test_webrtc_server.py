@@ -216,11 +216,18 @@ class TestStandardizedModerationReport(unittest.TestCase):
             stream_id="s", frame_id=1, label="Toxic", confidence=0.9,
             text_confidence=0.88, image_confidence=0.9, latency_ms=12.0,
             alert_level="CRITICAL", flagged=True,
+            report={
+                "verdict": "CRITICAL TOXICITY VIOLATION",
+                "reasoning": "Cross-modal probabilities",
+                "recommendation": "Instant Mute / Quarantine WebRTC Track",
+                "next_steps": ["Step 1: Terminate", "Step 2: Strike", "Step 3: Audit"],
+            },
             verdict="V", reasoning="R", recommendation="Rec", next_steps=["a", "b", "c"],
         )
         d = alert.model_dump()
         for field in REPORT_FIELDS:
             self.assertIn(field, d)
+        self.assertEqual(set(d["report"]), set(REPORT_FIELDS))
 
 
 class TestAlertPipelineLatencySLA(unittest.IsolatedAsyncioTestCase):

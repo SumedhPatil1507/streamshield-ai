@@ -1,222 +1,168 @@
-# 🛡️ StreamShield AI
+# StreamShield AI
 
 <div align="center">
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![TensorRT](https://img.shields.io/badge/NVIDIA_TensorRT-10.0+-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://developer.nvidia.com/tensorrt)
-[![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-1.18+-005CED?style=for-the-badge&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
-[![WebRTC](https://img.shields.io/badge/WebRTC-Real--Time-333333?style=for-the-badge&logo=webrtc&logoColor=white)](https://webrtc.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Streamlit App](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-2.3-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-10B981?style=for-the-badge)](LICENSE)
+**Interactive multimodal moderation for live streams and uploaded media**
 
-**Ultra-Low Latency (<50ms) Multimodal Live-Stream Moderation & Streaming Intelligence Engine**
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Streamlit](https://img.shields.io/badge/Cockpit-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Plotly](https://img.shields.io/badge/Charts-Interactive%20Plotly-3F4F75?logo=plotly&logoColor=white)](https://plotly.com/)
+[![ONNX Runtime](https://img.shields.io/badge/Inference-ONNX%20Runtime-005CED)](https://onnxruntime.ai/)
+[![License](https://img.shields.io/badge/License-MIT-10B981)](LICENSE)
 
-*Sub-50ms Glass-to-Alert Ingestion via WebRTC & RTSP, Zero-Copy GPU DMA Pinned Host Memory, TensorRT FP16 Acceleration, and Interactive Streamlit Cockpit with Plotly Visualizations.*
-
-[🚀 Quickstart](#-quickstart) • [✨ Key Capabilities](#-key-capabilities) • [🖥️ Streamlit Cockpit](#️-interactive-streamlit-cockpit) • [📡 WebRTC & RTSP Server](#-webrtc--rtsp-real-time-ingestion-server) • [🏗️ Architecture](#️-system-architecture) • [📊 Benchmarks](#-benchmarks--performance) • [📄 Whitepaper](docs/PERFORMANCE_WHITEPAPER.md)
-
----
+[Quickstart](#quickstart) · [Interactive cockpit](#interactive-cockpit) · [Upload API](#upload-media-and-explore-the-risk-timeline) · [Live streams](#live-stream-api) · [Performance notes](#performance-and-benchmarks)
 
 </div>
 
-## 🌟 Overview
+StreamShield AI combines video ingestion, text and image moderation, explainable policy reports, and an interactive Streamlit dashboard. It supports WebRTC and RTSP streams, plus frame-by-frame moderation of MP4, MOV, JPG, JPEG, and PNG uploads.
 
-**StreamShield AI** is an enterprise-grade, high-throughput multimodal moderation engine designed for live streaming broadcasts, interactive WebRTC video feeds, RTSP security cameras, and high-frequency social platforms.
+The inference engine prefers ONNX Runtime's TensorRT execution provider when available, then CUDA, then CPU. PyAV uses native FFmpeg bindings for media decoding; RTSP demux and decode run outside the asyncio event loop. Pinned host buffers and CUDA streams are used for asynchronous transfers when CUDA is available.
 
-By uniting **TensorRT FP16 execution graphs**, **asynchronous zero-copy GPU DMA transfers (`torch.cuda.HostRegister` / pinned memory)**, **non-blocking WebRTC/RTSP ingestion queues**, and **real-time WebSocket alert broadcasting**, StreamShield AI detects and quarantines toxic speech, NSFW visuals, and policy violations within a **strict <50 ms SLA** (achieving **18.4 ms p99 end-to-end latency** at **1,420 FPS per NVIDIA A100**).
+> **Performance status:** latency, throughput, VRAM, and concurrency figures in the whitepaper are reference targets, not results reproduced from this checkout. See [Performance and benchmarks](#performance-and-benchmarks).
 
-```
-[WebRTC / RTSP 1080p60] 
-       │
-       ▼ (Decoupled Async Queue)
-[Pinned Host RAM (Page-Locked)] ════(Zero-Copy DMA: 0.82ms)════> [GPU VRAM Buffer]
-                                                                       │
-                                              ┌────────────────────────┴────────────────────────┐
-                                              ▼                                                 ▼
-                              [TensorRT FP16 Vision Engine]                     [TensorRT FP16 Text/ASR Engine]
-                              (YOLO / CLIP ViT-B16: 6.2ms)                      (Llama-Guard / Whisper: 4.1ms)
-                                              └────────────────────────┬────────────────────────┘
-                                                                       ▼
-                                                    [Temporal Bayesian Cross-Modal Fusion]
-                                                                       │
-                                                                       ▼ (<18.4ms p99 Glass-to-Alert)
-                                                    [WebSocket Live Alert Hub Broadcast]
+## At a glance
+
+```mermaid
+flowchart LR
+    W[WebRTC] --> D[PyAV / FFmpeg decode]
+    R[RTSP] --> D
+    U[MP4 / MOV / images] --> F[Frame sampling]
+    D --> Q[Bounded frame queue]
+    F --> I[Text + vision inference]
+    Q --> I
+    I --> X[Explainable policy report]
+    X --> A[WebSocket alerts]
+    X --> T[Interactive Plotly timeline]
 ```
 
----
+## Interactive cockpit
 
-## ✨ Key Capabilities
-
-- ⚡ **Sub-50ms Ultra-Low Latency Inference**: Concurrently scores text (Llama-Guard/DistilBERT) and vision streams using **TensorrtExecutionProvider** $\rightarrow$ **CUDAExecutionProvider** $\rightarrow$ **CPUExecutionProvider** fallback hierarchy.
-- 🚀 **Zero-Copy Host Memory & CUDA Streams**: Pre-allocated page-locked host tensors (`torch.empty(..., pin_memory=True)`) and non-blocking asynchronous DMA transfers eliminating PCIe transfer bottlenecks.
-- 📡 **WebRTC & RTSP Live Stream Ingestion**: Full WebRTC SDP offer/answer peer connection handling (`/offer`) and PyAV low-latency H.264 RTSP camera demuxing (`/rtsp/connect`).
-- 🔔 **Real-Time WebSocket Moderation Alerts**: Instantaneous event-driven WebSocket broadcasting (`/ws/alerts`) to frontend subscriber dashboards with confidence scores and alert levels (`SAFE`, `WARNING`, `CRITICAL`).
-- 🛡️ **Multimodal Bayesian Decision Fusion**: Computes joint cross-modal risk scores with 128-dimensional $L_2$-normalized semantic embeddings.
-- 🖥️ **Interactive Streamlit Web Dashboard**: Auto-refreshing moderation studio, fully interactive Plotly charts (scroll-zoom, pan, hover, PNG export), live threshold re-scoring, an Auto-Live stream simulator with configurable refresh intervals, quarantine action queue, and an interactive benchmark stress-tester.
-- 📦 **Zero-Data-Loss Kafka Pipeline**: Manual offset management committing offsets to Kafka **only after** successful transactional writes to PostgreSQL audit logs.
-
----
-
-## 🚀 Quickstart
-
-### 1. Clone & Install Dependencies
-
-```powershell
-git clone https://github.com/SumedhPatil1507/streamshield-ai.git
-cd streamshield-ai
-
-# Python 3.11 is recommended for local development.
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-> **Which requirements file?**
-> `requirements.txt` contains the Streamlit cockpit dependencies (Streamlit, Plotly, pandas, ONNX Runtime, Pillow, structlog, …). The offline demo does not install PyTorch, Transformers, or Rust-built tokenizers.
-> For the full streaming backend (Kafka, PostgreSQL, WebRTC/FastAPI), additionally run `pip install -r requirements-full.txt`.
-
-### 2. Export & Optimize TensorRT ONNX Models *(optional)*
-
-```bash
-python scripts/export_onnx_tensorrt.py --output-dir models/ --fp16 --build-trt-cache
-```
-> Not required for a first run — if `models/*.onnx` are missing, `app.py` automatically generates valid ONNX stub graphs on startup (`scripts/export_onnx_stubs.py`).
-
-### 3. Launch the Interactive Streamlit Cockpit
+Launch the Streamlit app to explore the live moderation studio, stream simulator, upload timeline, analytics, and benchmark visualizations:
 
 ```powershell
 python -m streamlit run app.py
 ```
-> Open your browser at `http://localhost:8501` to access the interactive moderation studio and live pipeline simulator.
->
-> The cockpit boots in **offline mode** (`STREAMSHIELD_OFFLINE=1`): synthetic imagery replaces external HTTP fetches, so no API keys or network access are needed.
-> For Streamlit Community Cloud, choose Python 3.11 in **Advanced settings** when deploying. Cloud does not change an existing app's Python version in place; redeploy the app with the desired version if it was created on Python 3.14.
 
-### 4. Launch the WebRTC & RTSP Ingestion Server
+Open `http://localhost:8501`. The Plotly charts in the app are interactive: hover for values, zoom with the wheel, pan by dragging, select regions, reset axes, and export chart images from the Plotly modebar. The upload timeline plots risk against media time in seconds and shows the frame number on hover.
+
+GitHub renders this README as static Markdown and does not execute embedded Plotly JavaScript. Run the cockpit locally to use the interactive plots.
+
+## Quickstart
+
+```powershell
+git clone https://github.com/SumedhPatil1507/streamshield-ai.git
+cd streamshield-ai
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+For the FastAPI streaming server, install its additional dependencies and start it separately:
+
+```powershell
+python -m pip install -r requirements-full.txt
+python api/webrtc_server.py
+```
+
+The cockpit supports an offline demo mode with synthetic imagery. See the requirements files and application configuration for backend-specific dependencies.
+
+## Upload media and explore the risk timeline
+
+The `POST /moderate/upload` endpoint accepts `.mp4`, `.mov`, `.jpg`, `.jpeg`, and `.png` files up to 64 MB. Videos are sampled and analyzed in batches; the response contains per-frame modality scores, a standardized report, summary statistics, and an optional peak-frame thumbnail.
 
 ```bash
-python api/webrtc_server.py
-# Server runs on http://0.0.0.0:8000 with WebSocket alerts on ws://localhost:8000/ws/alerts
+curl -X POST http://localhost:8000/moderate/upload \
+  -F "file=@clip.mp4" \
+  -F "sample_fps=2" \
+  -F "max_frames=64" \
+  -F "caption=Optional transcript or context"
 ```
 
----
+The response's `timeline` entries include `t_sec`, `frame`, fused `confidence`, `text_confidence`, `image_confidence`, `alert_level`, and `flagged`. In the cockpit, the interactive Plotly timeline lets you inspect these values over the clip.
 
-## 🖥️ Interactive Streamlit Cockpit
+## Live-stream API
 
-StreamShield AI includes a modern, dark-mode glassmorphic web cockpit built with **Streamlit** and **Plotly**.
+Start the server with `python api/webrtc_server.py`. The main routes are:
 
-```
-┌───────────────────────────────────────────────────────────────────────────────────────┐
-│ 🛡️ StreamShield AI — Multimodal Moderation Cockpit       [● ONNX ONLINE] [⚡ <50MS SLA]│
-├───────────────────────────────────────────────────────────────────────────────────────┤
-│ [🛡️ Live Studio]  [⚡ Stream Simulator]  [📊 Analytics]  [🚀 Benchmarks]  [🏗️ Specs]   │
-│                                                                                       │
-│  ┌──────────────────────────────┐        ┌─────────────────────────────────────────┐  │
-│  │ 📝 Input Payload & Preset    │        │ 📊 Real-Time Classification Verdict     │  │
-│  │                              │        │                                         │  │
-│  │ Text: "Aggressive toxic msg" │   ──►  │ [🚨 TOXIC VIOLATION]  Confidence: 94.2%  │  │
-│  │ Image: [nsfw_flagged.jpg]    │        │ Latency: 14.8 ms (SLA MET ✓)            │  │
-│  │                              │        │ Modality Breakdown: Text 92% | Img 94%  │  │
-│  └──────────────────────────────┘        └─────────────────────────────────────────┘  │
-│                                                                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ 📈 Latency Distribution & Concurrency Scaling Radar (Plotly Subplots)           │  │
-│  └─────────────────────────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Dashboard Features:
-1. **🛡️ Live Moderation Studio**: Interactive scoring with preset scenarios (Wholesome Gaming, Toxic Harassment, NSFW Media, Spam Scam, Sarcasm), a Plotly risk gauge with modality breakdown, and a **128-d Embedding Spectrum Explorer** with a dimension-window slider. Decision-threshold sliders **re-score the verdict live** — move them and the verdict card updates instantly, without re-inference.
-2. **⚡ Stream Pipeline Simulator**: High-frequency streaming generator with an **🔴 Auto-Live Streaming** toggle (0.5 s–4 s refresh intervals) powered by `st.fragment` auto-reruns — KPI cards, the event scatter, packet ledger, and quarantine queue all redraw continuously — plus manual burst injection and moderator queue clearing.
-3. **📊 Analytics & Audit Logs**: Historical compliance records with verdict / confidence / text-search filters, latency distribution histograms with a 50 ms SLA marker, and 1-click CSV audit trail export.
-4. **🚀 Interactive Benchmarks**: Comprehensive performance analysis with interactive Plotly charts comparing CPU, CUDA, and TensorRT implementations:
-   - **Comparative Performance Matrix**: Latency metric multi-select + log/linear axis toggle, throughput, VRAM footprint, and SLA compliance comparisons
-   - **Concurrency Scaling Analysis**: 1 to 100 simultaneous streams with latency and throughput curves
-   - **Memory Footprint Analysis**: Detailed VRAM breakdown by component
-   - **Live Stress Testing**: Real-time ONNX engine benchmarking with percentile latency analysis
-5. **🏗️ Architecture & Model Specs**: Annotated system-architecture diagrams and model card tables.
-
-### Fully Interactive Plotly Charts
-Every chart in the cockpit is a native **Plotly** figure rendered with a shared configuration (`PLOT_CFG`):
-- **Scroll-zoom** with the mouse wheel, click-drag **pan**, and double-click to autoscale/reset
-- **Box & lasso selection** tools from the floating modebar
-- Rich **hover readouts** on every trace (unified crosshair on the embedding explorer)
-- **2× PNG export** of any chart straight from the modebar camera button
-- The modebar itself is themed to match the dark glassmorphism UI
-
----
-
-## 📡 WebRTC & RTSP Real-Time Ingestion Server
-
-StreamShield AI exposes high-performance REST and WebSocket endpoints via `api/webrtc_server.py`:
-
-| Endpoint | Protocol | Description |
+| Route | Type | Purpose |
 | :--- | :--- | :--- |
-| `POST /offer` | HTTP / JSON | WebRTC SDP Offer/Answer negotiation for browser video streams |
-| `POST /rtsp/connect` | HTTP / JSON | Connects and demuxes an external RTSP IP Camera/H.264 stream |
-| `POST /rtsp/disconnect/{id}` | HTTP / JSON | Gracefully terminates an active RTSP ingestion session |
-| `GET /streams` | HTTP / JSON | Returns telemetry and frame counters for all active streams |
-| `GET /health` | HTTP / JSON | Health check reporting inferred frames and active subscribers |
-| `GET /ws/alerts` | WebSocket | Real-time broadcast stream of structured moderation alerts |
+| `POST /offer` | HTTP | Negotiate a WebRTC SDP offer |
+| `POST /rtsp/connect` | HTTP | Start RTSP ingestion |
+| `POST /rtsp/disconnect/{stream_id}` | HTTP | Stop an RTSP stream |
+| `GET /streams` | HTTP | Inspect active stream status |
+| `GET /health` | HTTP | Check service health |
+| `/ws/alerts` | WebSocket | Receive real-time moderation alerts and send `{"action":"ping"}` heartbeats |
+| `POST /moderate/upload` | HTTP multipart | Moderate uploaded video or image media |
 
-### Sample WebSocket Alert JSON Payload:
+Each alert includes transport metadata and a canonical `report` object with exactly these four fields:
+
 ```json
 {
-  "alert_id": "c7a8b412-4e89-4b62-9e90-c14827d09123",
-  "stream_id": "webrtc_a9f182c0",
-  "frame_id": 1420,
-  "timestamp": "2026-10-08T14:30:15.120Z",
-  "label": "Toxic",
-  "confidence": 0.942,
-  "text_confidence": 0.918,
-  "image_confidence": 0.942,
-  "latency_ms": 14.82,
-  "alert_level": "CRITICAL",
-  "flagged": true
+  "verdict": "CRITICAL TOXICITY VIOLATION",
+  "reasoning": "Cross-modal Bayesian probability breakdown (Vision: 94.2%, Text/Audio: 91.8%)",
+  "recommendation": "Instant Mute / Quarantine WebRTC Track",
+  "next_steps": [
+    "Step 1: Terminate active WebRTC media track immediately",
+    "Step 2: Issue automated strike notification to the stream host",
+    "Step 3: Log frame timestamp and 128-d embedding into PostgreSQL audit trail"
+  ]
 }
 ```
 
----
+The same report shape is returned under `report` by the upload endpoint. WebSocket alert events also carry stream/frame identifiers, scores, latency, and alert status outside the report object.
 
-## 📊 Benchmarks & Performance
+## Model export and acceleration
 
-Evaluated on an **NVIDIA A100 80GB SXM4** + **Dual Intel Xeon Platinum 8480+**:
-
-| Metric | PyTorch CPU Baseline | PyTorch CUDA FP16 | StreamShield TensorRT + Zero-Copy DMA | Performance Gain |
-| :--- | :--- | :--- | :--- | :--- |
-| **Inference Latency (p50)** | $124.50\text{ ms}$ | $14.20\text{ ms}$ | **$4.12\text{ ms}$** | **$30.2\times\text{ Faster}$** |
-| **Inference Latency (p99)** | $310.80\text{ ms}$ | $38.90\text{ ms}$ | **$12.30\text{ ms}$** | **$25.3\times\text{ Faster}$** |
-| **End-to-End Glass-to-Alert (p99)** | $465.00\text{ ms}$ | $68.50\text{ ms}$ | **$18.40\text{ ms}$** | **$25.3\times\text{ Faster}$** |
-| **Throughput (Frames / Sec)** | $48\text{ FPS}$ | $380\text{ FPS}$ | **$1,420\text{ FPS}$** | **$29.6\times\text{ Higher}$** |
-| **GPU Memory VRAM Footprint** | N/A | $6,450\text{ MB}$ | **$1,840\text{ MB}$** | **$71.5\%\text{ VRAM Saved}$** |
-| **PCIe Transfer Overhead (Batch 16)**| $0\text{ ms}$ | $16.40\text{ ms}$ | **$0.82\text{ ms}$** | **$20.0\times\text{ Reduction}$** |
-| **Sub-50ms SLA Compliance** | $0.0\%$ | $84.2\%$ | **$99.98\%$** | **Deterministic** |
-
-> 📖 **Read the full publication-ready whitepaper:** [docs/PERFORMANCE_WHITEPAPER.md](docs/PERFORMANCE_WHITEPAPER.md)
-
----
-
-## 🧪 Testing & CI
-
-StreamShield AI maintains a 100% passing automated test suite covering TensorRT execution provider fallbacks, pinned host buffer DMA allocations, WebRTC offer/answer handling, and async queue batching:
+Export the repository's reference classifier graphs to ONNX and optionally prepare the ONNX Runtime TensorRT cache:
 
 ```bash
-# Run full test suite
-python -m unittest discover tests
-
-# Run TensorRT engine & zero-copy tests
-python tests/test_tensorrt_engine.py
-
-# Run WebRTC & RTSP server tests
-python tests/test_webrtc_server.py
+python scripts/export_onnx_tensorrt.py --output-dir models --fp16 --build-trt-cache
 ```
 
----
+`scripts/export_tensorrt_llm.py` handles the classifier and LLM paths separately:
 
-## 📜 License & Acknowledgments
+- The fixed-length text classifier and vision classifier use ONNX Runtime's `TensorrtExecutionProvider` with shape profiles and engine caches.
+- An optional converted causal language model can be built with TensorRT-LLM and paged KV cache using `--llm-checkpoint-dir`. In-flight batching is a serving-runtime behavior; building an engine does not start the scheduler.
 
-This project is licensed under the [MIT License](LICENSE). Built for high-throughput enterprise streaming platforms and real-time AI safety.
+```bash
+python scripts/export_tensorrt_llm.py --output-dir models/trt --export-only
+python scripts/export_tensorrt_llm.py --output-dir models/trt \
+  --text-onnx models/text_toxicity.onnx \
+  --vision-onnx models/image_classifier.onnx \
+  --llm-checkpoint-dir /path/to/converted-trtllm-checkpoint \
+  --fp16
+```
+
+The default reference classifier exporters initialize their own model weights. For deployment, provide ONNX exports containing the trained weights you intend to serve.
+
+## Explainable report contract
+
+Reports are built by `src/moderation_report.py`. The canonical object has exactly `verdict`, `reasoning`, `recommendation`, and `next_steps`. Live alert events wrap that report with transport metadata; upload responses include it under `report` alongside the timeline and statistics.
+
+## Performance and benchmarks
+
+The whitepaper discusses p50/p90/p99 latency, frames per second, VRAM footprint, and concurrency scaling. Its A100 figures are labeled as unverified reference targets: this checkout has no raw A100 run logs, and its current benchmark scripts do not measure full glass-to-alert latency, GPU VRAM, or multi-stream scaling. The inference benchmark measures the active provider; the pipeline benchmark uses a stub engine and measures orchestration overhead.
+
+Run the available benchmark scripts in the environment you want to characterize:
+
+```bash
+python scripts/_bench_sla.py
+python scripts/_bench_pipeline.py
+```
+
+For a reproducible performance claim, record hardware, software versions, model hashes, workload, warm-up, raw latency samples, completed and offered FPS, dropped frames, process VRAM, and simultaneous stream count. Read [docs/PERFORMANCE_WHITEPAPER.md](docs/PERFORMANCE_WHITEPAPER.md) for the measurement definitions and current evidence status.
+
+## Tests
+
+```bash
+python -m unittest discover tests
+```
+
+The tests cover inference preprocessing, report schema, upload behavior, alert orchestration, and provider-dependent latency budgets. They do not replace an A100 deployment benchmark.
+
+## License
+
+StreamShield AI is licensed under the [MIT License](LICENSE).

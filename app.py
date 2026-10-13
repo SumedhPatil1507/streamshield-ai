@@ -1304,22 +1304,22 @@ with tab_upload:
         fig_timeline = go.Figure()
         fig_timeline.add_trace(
             go.Scatter(
-                x=tl_df["frame"], y=tl_df["confidence"], name="Fused risk",
+                x=tl_df["t_sec"], y=tl_df["confidence"], customdata=tl_df["frame"], name="Fused risk",
                 mode="lines+markers", line=dict(color="#38bdf8", width=2.5),
                 marker=dict(size=9, color=tl_df["confidence"], colorscale="RdYlGn_r",
                             cmin=0.0, cmax=1.0, showscale=True, colorbar=dict(title="risk", thickness=10)),
-                hovertemplate="frame %{x}<br>fused %{y:.3f}<extra></extra>",
+                hovertemplate="%{x:.2f}s · frame %{customdata}<br>fused %{y:.3f}<extra></extra>",
             )
         )
         fig_timeline.add_trace(
-            go.Scatter(x=tl_df["frame"], y=tl_df["text_confidence"], name="Text/ASR modality",
+            go.Scatter(x=tl_df["t_sec"], y=tl_df["text_confidence"], name="Text/ASR modality",
                        mode="lines", line=dict(color="#818cf8", width=1.5, dash="dot"),
-                       hovertemplate="text %{y:.3f}<extra></extra>")
+                       hovertemplate="%{x:.2f}s<br>text %{y:.3f}<extra></extra>")
         )
         fig_timeline.add_trace(
-            go.Scatter(x=tl_df["frame"], y=tl_df["image_confidence"], name="Vision modality",
+            go.Scatter(x=tl_df["t_sec"], y=tl_df["image_confidence"], name="Vision modality",
                        mode="lines", line=dict(color="#34d399", width=1.5, dash="dot"),
-                       hovertemplate="vision %{y:.3f}<extra></extra>")
+                       hovertemplate="%{x:.2f}s<br>vision %{y:.3f}<extra></extra>")
         )
         fig_timeline.add_hline(y=0.50, line_dash="dashdot", line_color="#fbbf24",
                                annotation_text="WARNING ≥ 50%", annotation_position="bottom right")
@@ -1332,7 +1332,7 @@ with tab_upload:
             font=dict(color="#94a3b8"), hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
             yaxis=dict(range=[0, 1.02], gridcolor="rgba(255,255,255,0.05)", title="Risk confidence"),
-            xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Frame index"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Time (seconds)"),
         )
         st.plotly_chart(fig_timeline, width="stretch", config=PLOT_CFG)
 

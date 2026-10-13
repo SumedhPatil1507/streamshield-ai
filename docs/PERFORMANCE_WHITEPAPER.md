@@ -13,20 +13,18 @@
 
 Live video streaming platforms face an unprecedented computational challenge: intercepting toxic speech, harmful visuals, violence, and policy violations in real-time without introducing perceptual latency into interactive broadcasts. Traditional moderation architectures rely on asynchronous out-of-band polling or cloud REST APIs that suffer from 500ms to 3000ms response latencies, rendering them incapable of live stream intervention.
 
-**StreamShield AI** introduces an ultra-low latency, deterministic inference engine engineered from first principles for high-performance computing (HPC). By combining:
+**StreamShield AI** is designed as a low-latency multimodal moderation pipeline. The performance values in this document are reference targets and have not been independently reproduced from this repository. The checked-in benchmark scripts do not collect A100 end-to-end, FPS, VRAM, or concurrency measurements. The design combines:
 1. **Zero-Copy Asynchronous Direct Memory Access (DMA)** across page-locked host memory and GPU VRAM,
 2. **TensorRT FP16 Kernel Graph Optimizations** with hardware execution caching,
 3. **Decoupled WebRTC / RTSP Ingestion Topologies**, and
 4. **Temporal Cross-Modal Fusion** (Whisper ASR, YOLO/CLIP Vision, and Llama-Guard Text),
 
-StreamShield AI achieves a **p99 end-to-end processing latency of 18.4 ms** at **1,420 FPS throughput per NVIDIA A100 GPU**, sustaining **100+ concurrent 1080p60 video streams** with deterministic sub-50ms SLA compliance.
+The reference target is **18.4 ms p99 end-to-end latency** and **1,420 FPS per NVIDIA A100 GPU**. These figures are not verified results for the current checkout. Validate them with the deployment models, hardware, and full ingest-to-alert workload before using them as an SLA.
 
-### Key Achievements for Enterprise Deployment
-- **30.2× faster inference latency** compared to PyTorch CPU baseline (124.5ms → 4.12ms p50)
-- **71.5% VRAM footprint reduction** (6.45GB → 1.84GB) through optimized tensor layout
-- **99.98% sub-50ms SLA compliance** under sustained 100-stream concurrent load
-- **Production-ready Kubernetes DaemonSet** with NVIDIA GPU Operator integration
-- **Zero data loss audit pipeline** with Kafka-PostgreSQL transactional consistency
+### Performance Measures to Validate
+- Inference latency and VRAM reduction figures previously listed here are unverified reference values; see Section 6.
+- **Benchmark status:** values in Section 6 require reproduction on the target hardware.
+- **Deployment status:** validate Kubernetes, audit, and data-retention integrations in the deployment environment.
 
 ---
 
@@ -487,9 +485,21 @@ def compute_fused_risk_score(
 
 ---
 
-## 6. Benchmark Performance Report
+## 6. Benchmark Performance Report (Validation Pending)
 
-### 6.1 Benchmark Environment Configuration
+> **Evidence status:** the numeric A100 rows and concurrency curves below are reference targets copied into the design report, not benchmark results produced by this checkout. No raw run logs, Nsight traces, `nvidia-smi` captures, or benchmark dataset are checked in. Treat those figures as unverified until the workload and hardware are recorded with the results. The repository's `_bench_sla.py` measures inference latency for the active provider; `_bench_pipeline.py` uses a stub inference engine and measures orchestration only. Neither measures full glass-to-alert latency, production throughput, VRAM, or multi-stream scaling.
+
+| Metric | Measurement definition | Evidence in this checkout |
+| :--- | :--- | :--- |
+| Inference latency p50 / p99 | Wall time around `infer_batch`, after warm-up, grouped by batch size and provider | `_bench_sla.py` records p50/p99 locally; not an A100 result |
+| Glass-to-alert p50 / p99 | Capture-to-alert-send wall time, including decode, queueing, inference, fusion, and WebSocket dispatch | Not instrumented end-to-end |
+| FPS throughput | Completed moderation frames divided by steady-state wall time; also report offered FPS and drops | Not measured by checked-in benchmarks |
+| VRAM footprint | Peak and steady-state process memory after engine warm-up, with model and cache versions recorded | Not captured by checked-in benchmarks |
+| Concurrency scaling | Repeat throughput, p50/p99, drops, GPU utilization, and VRAM at declared simultaneous stream counts | Not measured by checked-in benchmarks |
+
+For production reporting, include the exact GPU model and memory, driver/CUDA/TensorRT/ORT versions, model hashes, resolution, sampling policy, batch sizes, duration, warm-up count, and raw observations. Do not infer glass-to-alert latency from inference-only percentiles or infer stream capacity from a stub-engine test.
+
+### 6.1 Target Benchmark Environment (Reproduction Required)
 
 **Hardware Specifications:**
 * **GPU Compute:** $1 \times \text{NVIDIA A100-SXM4-80GB}$ (PCIe Gen4 x16, 312 TFLOPS Tensor Core FP16, 19.5 TB/s HBM2e bandwidth).
@@ -511,14 +521,14 @@ def compute_fused_risk_score(
 * **Batch Size:** 16 frames per micro-batch (configurable 8-32)
 * **Duration:** 10-minute sustained load per benchmark iteration
 
-### 6.2 Benchmark Methodology
+### 6.2 Required Benchmark Methodology
 
 **Test Scenarios:**
 1. **CPU Baseline:** PyTorch with AVX-512 SIMD optimizations, no GPU acceleration
 2. **CUDA FP16 Standard:** PyTorch with standard `cuda()` transfers (pageable memory, synchronous copies)
 3. **TensorRT Zero-Copy:** StreamShield optimized pipeline with pinned memory, async DMA, TensorRT FP16
 
-**Metrics Collected:**
+**Metrics to Collect:**
 - **Latency Percentiles:** p50 (median), p90, p99 measured per inference batch
 - **Throughput:** Average frames processed per second (FPS)
 - **GPU Utilization:** SM utilization percentage via NVIDIA Nsight Systems
@@ -526,10 +536,10 @@ def compute_fused_risk_score(
 - **PCIe Transfer Time:** Host-to-device transfer latency measured via CUDA events
 - **SLA Compliance:** Percentage of inference requests completing within 50ms threshold
 
-**Statistical Validity:**
-- Each configuration tested over 100,000 inference requests
-- Warm-up period: 1,000 requests excluded from metrics (cold-start elimination)
-- Confidence interval: 95% via bootstrap resampling
+**Statistical Validity (required for a published result):**
+- Run each configuration for a declared duration and enough requests to characterize the p99 tail; preserve raw observations.
+- Exclude a declared warm-up period, but report cold-start time separately.
+- Include confidence intervals (for example, bootstrap intervals) for reported percentiles and throughput.
 
 ### 6.3 Comparative Performance Matrix
 
@@ -565,7 +575,7 @@ StreamShield TensorRT Zero-Copy (Total = 18.40 ms):
 
 ### Concurrency Scaling: 1 to 100 Simultaneous Streams
 
-The following table evaluates performance under sustained concurrent load scaling on a single NVIDIA A100 GPU:
+The following unverified reference table illustrates the measurements to collect during sustained concurrent load scaling on a single NVIDIA A100 GPU:
 
 | Active Streams | Aggregate Input (FPS) | StreamShield Ingestion (FPS) | Median Latency (p50) | Tail Latency (p99) | GPU Utilization | VRAM Used (GB) | SLA Breaches (<50ms) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
